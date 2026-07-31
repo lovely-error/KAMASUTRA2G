@@ -47,8 +47,9 @@ module tb_datapath
 
   // ---- register file -----------------------------------------------------
   logic        rst_n = 0;
-  logic [4:0]  ra_addr = 0, rb_addr = 0, w_addr = 0;
-  logic [31:0] ra_value, rb_value, w_value = 0;
+  logic [4:0]  ra_addr = 0, rb_addr = 0, rc_addr = 0, w_addr = 0;
+  logic [31:0] ra_value, rb_value, rc_value, w_value = 0;
+  logic        rc_overflow, rc_flag;
   logic [2:0]  ra_tag, rb_tag, w_tag = RDT_U32;
   logic        ra_overflow, rb_overflow, ra_flag, rb_flag;
   logic        we_value = 0, we_tag = 0, we_overflow = 0, we_flag = 0;
@@ -184,14 +185,17 @@ module tb_datapath
     check("port B", rb_value == 32'd42);
     check("port B tag", rb_tag == RDT_U8);
 
-    // Same-cycle forwarding: without it every two-address ALU op would stall,
-    // since the destination is also a source.
+    // Reads are read-before-write: a read in the same cycle as a write sees
+    // the OLD value, and the write lands at the edge. A bypass here would
+    // close a combinational loop, since in a single-cycle core the write data
+    // is computed from these reads.
+    rf_write(5'd9, 32'hAAAA_0000, RDT_U32);
     @(negedge clk);
     w_addr = 5'd9; w_value = 32'h1234_5678; we_value = 1;
     ra_addr = 5'd9; #1;
-    check("read forwards an in-flight write", ra_value == 32'h1234_5678);
+    check("read sees the old value during a write", ra_value == 32'hAAAA_0000);
     @(posedge clk); @(negedge clk); we_value = 0;
-    #1; check("write landed", ra_value == 32'h1234_5678);
+    #1; check("write landed on the edge", ra_value == 32'h1234_5678);
 
     // Per-field enables: a comparison writes only flag_bit, an arithmetic op
     // only overflow. This is why the array is flops rather than RAM.

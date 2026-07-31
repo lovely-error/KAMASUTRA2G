@@ -45,6 +45,20 @@ module k2g_regfile
     output logic        ra_flag,
     output logic        rb_flag,
 
+    // Third read port, for the predicate register named by an XCP/XCN prefix.
+    // The value is needed because VALUE_ZERO / VALUE_NEGATIVE / VALUE_POSITIVE
+    // test the register's value rather than a flag (spec 7).
+    //
+    // The plan avoids this port by evaluating the predicate during the
+    // prefix's own decode cycle, when port A is idle. That is the better
+    // design and remains the intent; a third port is taken here because it
+    // costs one more copy of the value array (+16 RAM16SDP4) and keeps the
+    // first working core simple. Revisit once cosimulation is green.
+    input  logic [4:0]  rc_addr,
+    output logic [31:0] rc_value,
+    output logic        rc_overflow,
+    output logic        rc_flag,
+
     // Single write port, with independent enables per field.
     input  logic        we_value,
     input  logic        we_tag,
@@ -92,21 +106,31 @@ module k2g_regfile
   end
 
   // ---- reads -------------------------------------------------------------
-  // Write-first bypass: a read in the same cycle as a write to the same
-  // register sees the new value. Without it every two-address ALU op would
-  // need an interlock, since the destination is also a source -- and in this
-  // ISA that is the common case, not the exception.
-  wire logic [31:0] ra_raw = values[ra_addr];
-  wire logic [31:0] rb_raw = values[rb_addr];
+  // READ-BEFORE-WRITE, deliberately. Reads see the value as of the start of
+  // the cycle; the write lands at the clock edge.
+  //
+  // A write-first bypass belongs in a pipelined core, where the in-flight
+  // write comes from an *earlier* instruction. Here execute is a single cycle,
+  // so the write being presented is this instruction's own result -- and
+  // because that result is computed from these very reads, bypassing closes a
+  // combinational loop through the register file. It hung simulation with an
+  // iteration-limit error rather than producing a wrong answer, which at least
+  // fails loudly.
+  //
+  // This also matches the SSRAM primitive's natural behaviour, so nothing has
+  // to be built to get it.
+  assign ra_value    = values[ra_addr];
+  assign rb_value    = values[rb_addr];
+  assign rc_value    = values[rc_addr];
 
-  assign ra_value = (we_value && (w_addr == ra_addr)) ? w_value : ra_raw;
-  assign rb_value = (we_value && (w_addr == rb_addr)) ? w_value : rb_raw;
+  assign ra_tag      = tags[ra_addr];
+  assign rb_tag      = tags[rb_addr];
+  assign ra_overflow = overflow[ra_addr];
+  assign rb_overflow = overflow[rb_addr];
+  assign ra_flag     = flagbit[ra_addr];
+  assign rb_flag     = flagbit[rb_addr];
 
-  assign ra_tag      = (we_tag      && (w_addr == ra_addr)) ? w_tag      : tags[ra_addr];
-  assign rb_tag      = (we_tag      && (w_addr == rb_addr)) ? w_tag      : tags[rb_addr];
-  assign ra_overflow = (we_overflow && (w_addr == ra_addr)) ? w_overflow : overflow[ra_addr];
-  assign rb_overflow = (we_overflow && (w_addr == rb_addr)) ? w_overflow : overflow[rb_addr];
-  assign ra_flag     = (we_flag     && (w_addr == ra_addr)) ? w_flag     : flagbit[ra_addr];
-  assign rb_flag     = (we_flag     && (w_addr == rb_addr)) ? w_flag     : flagbit[rb_addr];
+  assign rc_overflow = overflow[rc_addr];
+  assign rc_flag     = flagbit[rc_addr];
 
 endmodule

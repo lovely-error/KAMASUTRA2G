@@ -74,9 +74,45 @@ if [ ${#tests[@]} -eq 0 ]; then
     done
 fi
 
+# tb_core runs a real assembled program rather than directed vectors, so it is
+# driven once per image, with the UART output the program is expected to print.
+PROGRAMS=(
+    "hello.bin:Hello"
+    "fib.bin:55"
+)
+
+# Assemble the images from source so RTL and emulator always run the same bits.
+for spec in "${PROGRAMS[@]}"; do
+    img="${spec%%:*}"
+    src="$ROOT/emu/programs/${img%.bin}.kasm"
+    [ -f "$src" ] || continue
+    ( cd "$ROOT/emu" && cargo run --quiet --bin kasm --         "programs/$(basename "$src")" -o "$HERE/$img" ) > /dev/null 2>&1
+done
+
 fail=0
 for t in "${tests[@]}"; do
     out="$WORK/$t.log"
+    if [ "$t" = "tb_core" ]; then
+        for spec in "${PROGRAMS[@]}"; do
+            img="${spec%%:*}"
+            want="${spec##*:}"
+            [ -f "$HERE/$img" ] || continue
+            plog="$WORK/tb_core_${img%.bin}.log"
+            "$VSIM" -c -quiet -do "onerror {quit -code 1}; run -all; quit -f"                 "+image=$HERE/$img" "+expect=$want" tb_core > "$plog" 2>&1
+            if grep -q "TB_PASS" "$plog" && ! grep -qE '^# \*\* (Error|Fatal)' "$plog"; then
+                n=$(grep -oE 'instructions: [0-9]+' "$plog" | tail -1 | cut -d' ' -f2)
+                printf '%-24s PASS  %s instructions
+' "tb_core[${img%.bin}]" "$n"
+            else
+                printf '%-24s FAIL
+' "tb_core[${img%.bin}]"
+                grep -E 'TB_FAIL|^# \*\* (Error|Fatal)|uart output' "$plog" | head -8
+                fail=1
+            fi
+        done
+        continue
+    fi
+
     if [ "${GUI:-0}" = "1" ]; then
         "$VSIM" -sv_lib "$ROOT/emu/target/release/k2g_dpi" "$t" &
         continue

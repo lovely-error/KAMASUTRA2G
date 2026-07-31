@@ -52,13 +52,40 @@ vg="$WORK/impl/gwsynthesis/project.vg"
 [ -f "$vg" ] || { echo "SYNTH FAILED ($TOP): no netlist"; exit 1; }
 
 echo "SYNTH OK: $TOP"
-grep -oE '^  [A-Z][A-Z0-9_]*' "$vg" | tr -d ' ' | sort | uniq -c | sort -rn |
-    awk '{printf "  %-14s %s\n", $2, $1}' | head -14
 
-# Budget check against the plan's GW1NR-9C figures.
-luts=$(grep -cE '^  (LUT[0-9]|MUX2_LUT)' "$vg")
-ffs=$(grep -cE '^  DFF' "$vg")
-echo
-printf '  approx LUT: %-6s of 8640 (%d%%)\n' "$luts" $((luts * 100 / 8640))
-printf '  approx FF : %-6s of 6480 (%d%%)\n' "$ffs"  $((ffs * 100 / 6480))
+# Gowin's own resource report is authoritative: it counts ALU cells and DSP
+# macros separately from LUTs, which a raw primitive tally in the netlist gets
+# wrong. GW1NR-9C budget: 8640 LUT, 6480 REG, 26 BSRAM, 20 DSP.
+rpt="$WORK/impl/gwsynthesis/project_syn_resource.html"
+if [ -f "$rpt" ]; then
+    python - "$rpt" <<'PYEND'
+import html, re, sys
+t = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+rows = re.findall(r'<tr.*?</tr>', t, re.S)
+data = []
+for r in rows:
+    cells = [html.unescape(re.sub('<[^>]*>', '', c)).strip().replace(' ', '')
+             for c in re.findall(r'<t[dh].*?</t[dh]>', r, re.S)]
+    cells = [c for c in cells if c]
+    if len(cells) >= 5:
+        data.append(cells)
+if len(data) >= 2:
+    hdr, top = data[0], data[1]
+    name = top[0].split(' (')[0]
+    def num(x):
+        try: return int(x)
+        except ValueError: return 0
+    reg, alu, lut, dsp = num(top[1]), num(top[2]), num(top[3]), num(top[4])
+    print(f"  module   {name}")
+    print(f"  LUT      {lut:>6}  of 8640  ({lut*100//8640}%)")
+    print(f"  ALU      {alu:>6}")
+    print(f"  REG      {reg:>6}  of 6480  ({reg*100//6480}%)")
+    print(f"  DSP      {dsp:>6}  of 20")
+PYEND
+fi
+
+echo "  primitives:"
+grep -oE '^  [A-Z][A-Z0-9_]*' "$vg" | tr -d ' ' | sort | uniq -c | sort -rn |
+    head -12 | while read -r n prim; do printf '    %-14s %s
+' "$prim" "$n"; done
 echo "  full log: $WORK/log.txt"

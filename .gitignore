@@ -40,3 +40,6 @@ Thumbs.db
 
 # Questa simulation output
 /rtl/sim/work/
+
+# Assembled images for the RTL testbenches
+/rtl/sim/*.bin
