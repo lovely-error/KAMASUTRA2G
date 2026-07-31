@@ -36,6 +36,9 @@ matches it.
 
 - **[docs/isa-spec.md](docs/isa-spec.md)** — the specification. Start here.
 - **[docs/isa-opcodes.md](docs/isa-opcodes.md)** — opcode encodings. *Generated.*
+- **[docs/toolchain.md](docs/toolchain.md)** — `kasm` and `kdis`: assembly syntax, every
+  mnemonic, prefixes, directives and diagnostics.
+- **[docs/bring-up.md](docs/bring-up.md)** — getting the machine onto a Tang Nano 9K.
 - **[docs/gowin-sv-support.md](docs/gowin-sv-support.md)** — which SystemVerilog constructs the
   Gowin toolchain actually accepts, measured rather than assumed.
 
