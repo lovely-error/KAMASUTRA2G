@@ -1,0 +1,33 @@
+# Rust build artifacts
+/emu/target/
+target/
+
+# Compiled helper binaries (rebuildable from source)
+gen_enum.exe
+
+# Gowin IDE build output
+/K2606/impl/
+*.fs
+*.bin
+
+# Gowin IP generator scratch (contains duplicate copies of the shipped netlist)
+/K2606/src/psram_memory_interface_hs/temp/
+
+# Questa / ModelSim simulation output
+work/
+transcript
+vsim.wlf
+*.wlf
+modelsim.ini
+*.mti
+covhtmlreport/
+
+# Leftover empty git dir from the pre-root-repo layout (zero commits, nothing to keep)
+/emu/.git-empty-backup/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store

@@ -1,0 +1,17 @@
+source_dirs:
+  - ./
+verible:
+  # verible-verilog-syntax configuration
+  syntax:
+    # default: true if in path
+    enabled: true,
+    path: "verible-verilog-syntax"
+    # default: none
+    args:
+  # verible-verilog-format configuration
+  format:
+    # default: true if in path
+    enabled: true,
+    path: "verible-verilog-format"
+    # default: none
+    args:

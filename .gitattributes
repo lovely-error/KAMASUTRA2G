@@ -1,0 +1,25 @@
+# Normalize line endings to LF in the repository.
+# This matters beyond tidiness: the generated rtl/k2g_defs.svh is compared
+# against a checked-in golden file, and CRLF drift would fail that test
+# spuriously on Windows.
+* text=auto eol=lf
+
+# Sources that must stay LF
+*.rs    text eol=lf
+*.sv    text eol=lf
+*.svh   text eol=lf
+*.v     text eol=lf
+*.vh    text eol=lf
+*.md    text eol=lf
+*.toml  text eol=lf
+*.tcl   text eol=lf
+*.cst   text eol=lf
+*.sdc   text eol=lf
+*.kasm  text eol=lf
+
+# Binary / generated — never touch
+*.exe   binary
+*.bc    binary
+*.fs    binary
+*.vo    binary
+*.pdf   binary
