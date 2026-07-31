@@ -1,7 +1,4 @@
-mod insns;
-mod interp;
-
-use interp::Interpreter;
+use emu::interp::Interpreter;
 
 fn main() {
 	const MEM_SIZE: usize = 1024 * 1024;
@@ -15,8 +12,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::interp::{DataKind, Flags, Reg};
-	use crate::insns::*;
+	use emu::interp::{DataKind, Flags, Reg};
+	use emu::insns::*;
 
 	fn write_code(mem: *mut u16, offset: &mut usize, code: &[u16]) {
 		for &cp in code {

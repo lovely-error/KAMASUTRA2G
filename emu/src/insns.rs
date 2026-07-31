@@ -1,7 +1,53 @@
-#[allow(nonstandard_style)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u16)]
-pub enum LB {
+/// Declares an ISA opcode enum *and* a reflected table of its variants.
+///
+/// The whole point is that `VARIANTS` is generated from the same tokens as the
+/// enum body, so the SystemVerilog header emitted by `crate::sv_gen` cannot
+/// drift from the Rust definition. The superseded `decoder.sv` diverged exactly
+/// this way -- it had `LB_ADD = 62` against the emulator's 53, and duplicate
+/// labels (`LB_GTE` at both 53 and 35) that nothing detected.
+///
+/// `BITS` is the width of the field the opcode occupies in a code point, which
+/// the generator needs to emit `typedef enum logic [BITS-1:0]`.
+macro_rules! isa_enum {
+	(
+		$vis:vis enum $name:ident : $bits:literal {
+			$( $variant:ident = $value:expr ),* $(,)?
+		}
+	) => {
+		#[allow(nonstandard_style)]
+		#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+		#[repr(u16)]
+		$vis enum $name {
+			$( $variant = $value ),*
+		}
+
+		impl $name {
+			/// Width in bits of the code-point field this enum occupies.
+			pub const BITS: u32 = $bits;
+
+			/// Every variant as `(name, value)`, in declaration order.
+			pub const VARIANTS: &'static [(&'static str, u16)] = &[
+				$( (stringify!($variant), $value) ),*
+			];
+
+			/// Name of the variant with this value, if any.
+			#[allow(dead_code)]
+			pub fn name_of(value: u16) -> Option<&'static str> {
+				let mut i = 0;
+				while i < Self::VARIANTS.len() {
+					if Self::VARIANTS[i].1 == value {
+						return Some(Self::VARIANTS[i].0);
+					}
+					i += 1;
+				}
+				None
+			}
+		}
+	};
+}
+
+isa_enum! {
+pub enum LB : 6 {
   LB_EP1 = 0b111111, // 63
   LB_PUC8 = 0b111110, // 62
   LB_PUC16 = 0b111101, // 61
@@ -74,11 +120,10 @@ pub enum LB {
   LB_UNCLAIMED_1 = 0b000001, // 1
   LB_UNCLAIMED_0 = 0b000000 // 0
 }
+}
 
-#[allow(nonstandard_style)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u16)]
-pub enum EP1 {
+isa_enum! {
+pub enum EP1 : 5 {
 
   EP1_EP2 = 0b11111, // 31
   EP1_UTO = 0b11110, // 30
@@ -117,10 +162,10 @@ pub enum EP1 {
   EP1_UNCLAIMED_0 = 0b00000 // 0
 
 }
-#[allow(nonstandard_style)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u16)]
-pub enum EP2 {
+}
+
+isa_enum! {
+pub enum EP2 : 5 {
 
   EP2_FLAG = 0b11111, // 31
   EP2_CSP = 0b11110, // 30
@@ -159,11 +204,10 @@ pub enum EP2 {
   EP2_UNCLAIMED_0 = 0b00000 // 0
 
 }
+}
 
-#[allow(nonstandard_style)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u16)]
-pub enum CC {
+isa_enum! {
+pub enum CC : 5 {
 
   CC_OVERFLOW_SET = 0b11111, // 31
   CC_FLAG_SET = 0b11110, // 30
@@ -202,6 +246,22 @@ pub enum CC {
   CC_UNCLAIMED_0 = 0b00000 // 0
 
 }
+}
+
+// ---- Code point field layout ----
+//
+// Mirrored into the generated SystemVerilog package so the RTL never hardcodes
+// bit positions. `layout_matches_pack_functions` below asserts these agree with
+// pack_6_5_5 / pack_6_10, which remain the definition of record.
+pub const CP_WIDTH: u32 = 16;
+pub const LB_LSB: u32 = 10;
+pub const LB_WIDTH: u32 = 6;
+pub const ARG1_LSB: u32 = 5;
+pub const ARG1_WIDTH: u32 = 5;
+pub const ARG2_LSB: u32 = 0;
+pub const ARG2_WIDTH: u32 = 5;
+pub const IMM10_LSB: u32 = 0;
+pub const IMM10_WIDTH: u32 = 10;
 
 pub const fn pack_6_5_5(lb: u16, arg1: u16, arg2: u16) -> u16 {
 	assert!(lb <= 0x3f);
@@ -787,3 +847,60 @@ pub fn encode_xcn(rix: u16, cc: CC) -> [u16;1] {
 	]
 }
 
+
+#[cfg(test)]
+mod layout_tests {
+	use super::*;
+
+	/// The exported field-position constants must describe what pack/unpack
+	/// actually do. The constants are mirrored into the generated SystemVerilog
+	/// package; if they drifted, the RTL would decode different bits than the
+	/// emulator -- the precise failure mode that made `decoder.sv` unusable
+	/// (it read the opcode from `lane[5:0]` rather than `cp[15:10]`).
+	#[test]
+	fn layout_matches_pack_functions() {
+		// A field of all ones lands exactly where the constants claim.
+		let lb_only = pack_6_5_5((1 << LB_WIDTH) - 1, 0, 0);
+		assert_eq!(lb_only, (((1 << LB_WIDTH) - 1) as u16) << LB_LSB);
+
+		let arg1_only = pack_6_5_5(0, (1 << ARG1_WIDTH) - 1, 0);
+		assert_eq!(arg1_only, (((1 << ARG1_WIDTH) - 1) as u16) << ARG1_LSB);
+
+		let arg2_only = pack_6_5_5(0, 0, (1 << ARG2_WIDTH) - 1);
+		assert_eq!(arg2_only, (((1 << ARG2_WIDTH) - 1) as u16) << ARG2_LSB);
+
+		let imm_only = pack_6_10(0, (1 << IMM10_WIDTH) - 1);
+		assert_eq!(imm_only, (((1 << IMM10_WIDTH) - 1) as u16) << IMM10_LSB);
+
+		// The three 6/5/5 fields tile the code point with no gap or overlap.
+		assert_eq!(LB_WIDTH + ARG1_WIDTH + ARG2_WIDTH, CP_WIDTH);
+		assert_eq!(ARG2_LSB + ARG2_WIDTH, ARG1_LSB);
+		assert_eq!(ARG1_LSB + ARG1_WIDTH, LB_LSB);
+		assert_eq!(LB_LSB + LB_WIDTH, CP_WIDTH);
+
+		// The 6/10 format shares the same opcode field.
+		assert_eq!(IMM10_LSB + IMM10_WIDTH, LB_LSB);
+	}
+
+	/// arg1 and imm10 share a left edge at bit 9. The RTL depends on this:
+	/// the predicate register index in an XCP/XCN prefix sits at cp[9:5],
+	/// the same position as arg1, so register read port A needs no address mux.
+	#[test]
+	fn arg1_and_imm10_share_a_left_edge() {
+		assert_eq!(ARG1_LSB + ARG1_WIDTH, IMM10_LSB + IMM10_WIDTH);
+	}
+
+	#[test]
+	fn pack_unpack_round_trips() {
+		for lb in [0u16, 1, 31, 53, 63] {
+			for a1 in [0u16, 1, 17, 31] {
+				for a2 in [0u16, 1, 30, 31] {
+					assert_eq!(unpack_6_5_5(pack_6_5_5(lb, a1, a2)), (lb, a1, a2));
+				}
+			}
+			for imm in [0u16, 1, 512, 1023] {
+				assert_eq!(unpack_6_10(pack_6_10(lb, imm)), (lb, imm));
+			}
+		}
+	}
+}
