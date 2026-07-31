@@ -11,6 +11,11 @@ set -u
 
 GW_SH="${GW_SH:-C:/Gowin/Gowin_V1.9.12.02_SP2_x64/IDE/bin/gw_sh.exe}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# Fail clearly if this is WSL rather than Git Bash; the Windows toolchains
+# are not reachable from WSL and the resulting error is misleading.
+. "$HERE/../sim/shell_check.sh"
+k2g_require_windows_shell || exit 1
 RTL="$(cd "$HERE/.." && pwd)"
 WORK="$HERE/out/pkg_check"
 

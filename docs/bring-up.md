@@ -3,10 +3,23 @@
 Three bitstreams, built in order so that a failure says which layer is at
 fault rather than just "it doesn't work".
 
+**Use Git Bash, not WSL.** On a Windows box with WSL installed, `bash` from
+PowerShell resolves to WSL's bash, whose filesystem has no `C:/Gowin` or
+`E:/Quartus`. Every script checks for this and says so rather than reporting a
+missing toolchain.
+
+From a Git Bash prompt:
+
 ```bash
 bash rtl/board/build.sh blink       # 1. toolchain, pinout, clock
 bash rtl/board/build.sh loopback    # 2. UART pins and baud rate
 bash rtl/board/build.sh soc         # 3. the whole machine
+```
+
+Or from PowerShell, naming Git Bash explicitly:
+
+```powershell
+& "C:\Program Files\Gitinash.exe" rtl/board/build.sh soc
 ```
 
 Flash with either the Gowin Programmer GUI or:

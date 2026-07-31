@@ -62,6 +62,11 @@ halted after 174 instructions
 
 ## Verifying
 
+Everything that shells out to Gowin or Questa needs **Git Bash, not WSL** —
+WSL cannot reach the Windows toolchains. From PowerShell, name it explicitly:
+`& "C:\Program Files\Gitinash.exe" <script>`. The scripts detect this
+and say so.
+
 ```bash
 cd emu && cargo test          # emulator, assembler, spec conformance
 bash rtl/sim/run.sh           # RTL directed testbenches + program runs

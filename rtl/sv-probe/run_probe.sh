@@ -14,6 +14,11 @@ DEVICE_NAME="GW1NR-9C"
 DEVICE_PN="GW1NR-LV9QN88PC6/I5"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# Fail clearly if this is WSL rather than Git Bash; the Windows toolchains
+# are not reachable from WSL and the resulting error is misleading.
+. "$HERE/../sim/shell_check.sh"
+k2g_require_windows_shell || exit 1
 OUT="$HERE/out"
 mkdir -p "$OUT"
 

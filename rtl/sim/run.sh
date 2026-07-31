@@ -13,6 +13,11 @@ set -u
 
 QUESTA="${QUESTA:-E:/Quartus/questa_fse/win64}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# Fail clearly if this is WSL rather than Git Bash; the Windows toolchains
+# are not reachable from WSL and the resulting error is misleading.
+. "$HERE/shell_check.sh"
+k2g_require_windows_shell || exit 1
 RTL="$(cd "$HERE/.." && pwd)"
 ROOT="$(cd "$RTL/.." && pwd)"
 WORK="$HERE/work"
