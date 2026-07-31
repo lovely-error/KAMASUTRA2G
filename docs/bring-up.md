@@ -19,7 +19,7 @@ bash rtl/board/build.sh soc         # 3. the whole machine
 Or from PowerShell, naming Git Bash explicitly:
 
 ```powershell
-& "C:\Program Files\Gitinash.exe" rtl/board/build.sh soc
+& "C:\Program Files\Git\bin\bash.exe" rtl/board/build.sh soc
 ```
 
 Flash with either the Gowin Programmer GUI or:

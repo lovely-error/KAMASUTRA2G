@@ -64,7 +64,7 @@ halted after 174 instructions
 
 Everything that shells out to Gowin or Questa needs **Git Bash, not WSL** —
 WSL cannot reach the Windows toolchains. From PowerShell, name it explicitly:
-`& "C:\Program Files\Gitinash.exe" <script>`. The scripts detect this
+`& "C:\Program Files\Git\bin\bash.exe" <script>`. The scripts detect this
 and say so.
 
 ```bash
