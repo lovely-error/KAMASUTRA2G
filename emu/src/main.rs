@@ -4,7 +4,7 @@ fn main() {
 	const MEM_SIZE: usize = 1024 * 1024;
 	let mem = Box::leak(vec![0u16; MEM_SIZE].into_boxed_slice());
 	
-	let mut interp = Interpreter::new(mem.as_mut_ptr() as *mut ());
+	let mut interp = Interpreter::new(mem.as_mut_ptr() as *mut (), MEM_SIZE * 2);
 	interp.run();
 	
 }
@@ -47,7 +47,7 @@ mod tests {
 		// 5. Halt
 		write_code(mem.as_mut_ptr(), &mut offset, &encode_halt());
 
-		let mut interp = Interpreter::new(mem_ptr);
+		let mut interp = Interpreter::new(mem_ptr, mem.len() * 2);
 		interp.run();
 
 		assert_eq!(interp.regs[1], Reg { bits: 10, datatype: DataKind::U32, flags: Flags { overflow: false, flag_bit: false } });
@@ -75,7 +75,7 @@ mod tests {
 		
 		write_code(mem.as_mut_ptr(), &mut offset, &encode_halt());
 
-		let mut interp = Interpreter::new(mem_ptr);
+		let mut interp = Interpreter::new(mem_ptr, mem.len() * 2);
 		interp.run();
 
 		assert_eq!(interp.regs[1].bits, 40);
@@ -96,7 +96,7 @@ mod tests {
 
 		write_code(mem.as_mut_ptr(), &mut offset, &encode_halt());
 
-		let mut interp = Interpreter::new(mem_ptr);
+		let mut interp = Interpreter::new(mem_ptr, mem.len() * 2);
 		interp.run();
 
 		assert_eq!(interp.regs[1].bits, 0); // low 32 bits
@@ -132,7 +132,7 @@ mod tests {
 
 		write_code(mem.as_mut_ptr(), &mut offset, &encode_halt());
 
-		let mut interp = Interpreter::new(mem_ptr);
+		let mut interp = Interpreter::new(mem_ptr, mem.len() * 2);
 		interp.run();
 
 		assert_eq!(interp.regs[4].bits, 0xdeadbeef);
@@ -158,7 +158,7 @@ mod tests {
 
 		write_code(mem.as_mut_ptr(), &mut offset, &encode_halt());
 
-		let mut interp = Interpreter::new(mem_ptr);
+		let mut interp = Interpreter::new(mem_ptr, mem.len() * 2);
 		interp.run();
 
 		assert!(interp.regs[1].flags.flag_bit); // 15 < 30 is true
@@ -187,7 +187,7 @@ mod tests {
 
 		write_code(mem.as_mut_ptr(), &mut offset, &encode_halt());
 
-		let mut interp = Interpreter::new(mem_ptr);
+		let mut interp = Interpreter::new(mem_ptr, mem.len() * 2);
 		
 		interp.run();
 
@@ -209,7 +209,7 @@ mod tests {
 
 		write_code(mem.as_mut_ptr(), &mut offset, &encode_halt());
 
-		let mut interp = Interpreter::new(mem_ptr);
+		let mut interp = Interpreter::new(mem_ptr, mem.len() * 2);
 		interp.run();
 
 		assert_eq!(interp.regs[1].bits, 0xbc);
@@ -246,7 +246,7 @@ mod tests {
 		// offset 22
 		write_code(mem.as_mut_ptr(), &mut offset, &encode_halt());
 
-		let mut interp = Interpreter::new(mem.as_mut_ptr() as *mut ());
+		let mut interp = Interpreter::new(mem.as_mut_ptr() as *mut (), mem.len() * 2);
 		interp.run();
 
 		assert_eq!(interp.regs[1].bits, 1);
@@ -312,7 +312,7 @@ mod tests {
 		assert_eq!(loop_top as isize + (11 << 1), halt_addr as isize, "forward branch reaches HALT");
 		assert_eq!(back_isa as isize + (-9 << 1), loop_top as isize, "backward branch reaches the loop top");
 
-		let mut interp = Interpreter::new(mem_ptr as _);
+		let mut interp = Interpreter::new(mem_ptr as _, mem.len() * 2);
 		interp.run();
 
 		// Fib(10) is 55

@@ -18,7 +18,7 @@ fn run(code: &[u16]) -> Interpreter {
 	for (i, &cp) in code.iter().enumerate() {
 		unsafe { ptr.add(i).write(cp) };
 	}
-	let mut interp = Interpreter::new(ptr as *mut ());
+	let mut interp = Interpreter::new(ptr as *mut (), mem.len() * 2);
 	interp.run();
 	interp
 }
@@ -500,7 +500,7 @@ fn spec_4_1_xizext_dispi_stays_positive() {
 
 	// Decode-only check: run would jump out of bounds, so inspect the target
 	// the decoder computes rather than executing it.
-	let target = emu::interp::decode_instruction(code.as_ptr() as *const (), 0);
+	let target = emu::interp::decode_instruction(code.as_ptr() as *const (), code.len() * 2, 0).expect("decode");
 	match target.insn {
 		emu::interp::CanonInsn::PrepareJump {
 			target: emu::interp::JumpTarget::RelImm(disp),
@@ -518,10 +518,13 @@ fn spec_4_1_xizext_dispi_stays_positive() {
 /// The XI form still sign-extends, so negative displacements keep working.
 #[test]
 fn spec_4_1_xi_dispi_still_sign_extends() {
+	let cps = encode_disp_imm_xim(-2048);
 	let decoded = emu::interp::decode_instruction(
-		encode_disp_imm_xim(-2048).as_ptr() as *const (),
+		cps.as_ptr() as *const (),
+		cps.len() * 2,
 		0,
-	);
+	)
+	.expect("decode");
 	match decoded.insn {
 		emu::interp::CanonInsn::PrepareJump {
 			target: emu::interp::JumpTarget::RelImm(disp),

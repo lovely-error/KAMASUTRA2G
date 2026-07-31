@@ -1,5 +1,7 @@
 use core::mem::transmute;
 
+use crate::devices::{Devices, FaultRegs};
+use crate::fault::{Fault, FaultCause, MAX_PREFIX_CHAIN, StopReason};
 use crate::insns::{
 	LB, EP1, EP2, CC, unpack_6_10, unpack_6_5_5, extract_bits
 };
@@ -7,23 +9,111 @@ use crate::insns::{
 pub struct Interpreter {
 	pub ip: u32,
 	pub mem_ptr: *mut (),
+	/// Size of the memory behind `mem_ptr`. Needed for `ADDR_OUT_OF_RANGE`;
+	/// without it the interpreter would happily dereference anything.
+	pub mem_bytes: usize,
 	pub regs: [Reg; 32],
+	/// The "next instruction address" latch: primed by `PrepareJump`, consumed
+	/// by `PerformJump`. Architectural state, so it lives here rather than as a
+	/// local of the run loop — the cosimulation trace needs to see it.
+	pub nisa: Option<u32>,
+	/// Retired instruction count, exposed via the `CYCLE_COUNT_*` ports.
+	pub cycles: u64,
+	pub dev: Devices,
+	pub faults: FaultRegs,
 }
 
+const RESET_REG: Reg = Reg {
+	bits: 0,
+	datatype: DataKind::U32,
+	flags: Flags { overflow: false, flag_bit: false },
+};
+
 impl Interpreter {
-	pub fn new(mem_ptr: *mut ()) -> Self {
+	pub fn new(mem_ptr: *mut (), mem_bytes: usize) -> Self {
 		Interpreter {
 			ip: 0,
 			mem_ptr,
-			regs: [Reg {
-				bits: 0,
-				datatype: DataKind::U32,
-				flags: Flags { overflow: false, flag_bit: false }
-			}; 32],
+			mem_bytes,
+			regs: [RESET_REG; 32],
+			nisa: None,
+			cycles: 0,
+			dev: Devices::default(),
+			faults: FaultRegs::default(),
 		}
 	}
-	pub fn run(&mut self) {
-		interpret_ucode(self);
+
+	pub fn with_devices(mem_ptr: *mut (), mem_bytes: usize, dev: Devices) -> Self {
+		let mut it = Interpreter::new(mem_ptr, mem_bytes);
+		it.dev = dev;
+		it
+	}
+
+	/// Runs until `HALT`, a fault, or `max_steps` instructions retire.
+	///
+	/// The step budget is what keeps a runaway program from hanging a test or
+	/// the cosimulation harness; it is not an architectural limit.
+	pub fn run_bounded(&mut self, max_steps: u64) -> StopReason {
+		for _ in 0..max_steps {
+			match self.step() {
+				Ok(true) => {}
+				Ok(false) => return StopReason::Halted,
+				Err(fault) => return StopReason::Faulted(fault),
+			}
+		}
+		StopReason::StepLimit
+	}
+
+	/// Convenience wrapper with a generous budget, for tests.
+	pub fn run(&mut self) -> StopReason {
+		self.run_bounded(10_000_000)
+	}
+
+	// ---- memory access -------------------------------------------------
+
+	fn in_range(&self, addr: u32, width: u32) -> bool {
+		let end = addr as u64 + width as u64;
+		end <= self.mem_bytes as u64
+	}
+
+	/// Fetches one code point. Instruction addresses are always halfword
+	/// aligned, so only the range needs checking here.
+	fn fetch_cp(&self, addr: u32) -> Result<u16, Fault> {
+		if !self.in_range(addr, 2) {
+			return Err(Fault::new(FaultCause::AddrOutOfRange, addr));
+		}
+		Ok(unsafe { self.mem_ptr.byte_add(addr as usize).cast::<u16>().read() })
+	}
+
+	fn read_mem(&self, addr: u32, width: u32) -> Result<u32, Fault> {
+		if addr % width != 0 {
+			return Err(Fault::new(FaultCause::MisalignedLoad, addr));
+		}
+		if !self.in_range(addr, width) {
+			return Err(Fault::new(FaultCause::AddrOutOfRange, addr));
+		}
+		let ptr = unsafe { self.mem_ptr.byte_add(addr as usize) };
+		Ok(match width {
+			1 => unsafe { ptr.cast::<u8>().read() as u32 },
+			2 => unsafe { ptr.cast::<u16>().read() as u32 },
+			_ => unsafe { ptr.cast::<u32>().read() },
+		})
+	}
+
+	fn write_mem(&mut self, addr: u32, width: u32, value: u32) -> Result<(), Fault> {
+		if addr % width != 0 {
+			return Err(Fault::new(FaultCause::MisalignedStore, addr));
+		}
+		if !self.in_range(addr, width) {
+			return Err(Fault::new(FaultCause::AddrOutOfRange, addr));
+		}
+		let ptr = unsafe { self.mem_ptr.byte_add(addr as usize) };
+		match width {
+			1 => unsafe { ptr.cast::<u8>().write(value as u8) },
+			2 => unsafe { ptr.cast::<u16>().write(value as u16) },
+			_ => unsafe { ptr.cast::<u32>().write(value) },
+		}
+		Ok(())
 	}
 }
 
@@ -368,7 +458,24 @@ pub struct DecodedInsn {
 	pub size_bytes: u32,
 }
 
-pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
+/// Decodes the instruction starting at `ip`.
+///
+/// Fallible because decode is where most faults originate: unassigned
+/// encodings, impossible prefix combinations, and runaway prefix chains.
+pub fn decode_instruction(
+	mem_ptr: *const (),
+	mem_bytes: usize,
+	ip: u32,
+) -> Result<DecodedInsn, Fault> {
+	// Bounds-checked code point fetch. Instruction addresses are always
+	// halfword aligned, so only the range needs checking.
+	let fetch = |addr: u32| -> Result<u16, Fault> {
+		if (addr as u64 + 2) > mem_bytes as u64 {
+			return Err(Fault::new(FaultCause::AddrOutOfRange, addr));
+		}
+		Ok(unsafe { mem_ptr.byte_add(addr as usize).cast::<u16>().read() })
+	};
+
 	let mut extended_imm: Option<u32> = None;
 	let mut imm_was_zext = false;
 	let mut conditional: Option<Conditional> = None;
@@ -385,19 +492,25 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 	let mut bit_manip: Option<(u8, u8)> = None;
 
 	let mut offset = 0;
+	let mut prefix_count = 0usize;
 	loop {
-		let cp = unsafe { mem_ptr.byte_add(ip as usize + offset).cast::<u16>().read() };
+		if prefix_count > MAX_PREFIX_CHAIN {
+			return Err(Fault::new(FaultCause::PrefixChainTooLong, ip));
+		}
+		let cp = fetch(ip + offset as u32)?;
 		
 		if let Some((imm, was_zext)) = try_decode_xim(cp) {
 			extended_imm = Some(imm);
 			imm_was_zext = was_zext;
 			offset += 2;
+			prefix_count += 1;
 			continue;
 		}
 		
 		if let Some(cond) = try_decode_xc(cp) {
 			conditional = Some(cond);
 			offset += 2;
+			prefix_count += 1;
 			continue;
 		}
 		
@@ -405,6 +518,7 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 		if lbs == LB::LB_BMX_0_0 as _ {
 			bit_manip = Some((arg1 as u8, arg2 as u8));
 			offset += 2;
+			prefix_count += 1;
 			continue;
 		}
 		
@@ -415,26 +529,31 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 				if ep2_op == EP2::EP2_FLAG as _ {
 					flag_op = true;
 					offset += 2;
+					prefix_count += 1;
 					continue;
 				}
 				if ep2_op == EP2::EP2_ICINVR as _ {
 					drop_icache = true;
 					offset += 2;
+					prefix_count += 1;
 					continue;
 				}
 				if ep2_op == EP2::EP2_CSP as _ {
 					csp = true;
 					offset += 2;
+					prefix_count += 1;
 					continue;
 				}
 				if ep2_op == EP2::EP2_MPD as _ {
 					prefetch_data = true;
 					offset += 2;
+					prefix_count += 1;
 					continue;
 				}
 				if ep2_op == EP2::EP2_MPI as _ {
 					prefetch_insn = true;
 					offset += 2;
+					prefix_count += 1;
 					continue;
 				}
 				break;
@@ -442,36 +561,42 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 				if ep1_op == EP1::EP1_UTO as _ {
 					uto_reg = Some(arg1 as u8);
 					offset += 2;
+					prefix_count += 1;
 					continue;
 				}
 				if ep1_op == EP1::EP1_SS as _ {
 					store_type = StoreOrdering::StoreSeq;
 					gix = arg1 as u8;
 					offset += 2;
+					prefix_count += 1;
 					continue;
 				}
 				if ep1_op == EP1::EP1_SR as _ {
 					store_type = StoreOrdering::StoreUnLock;
 					gix = arg1 as u8;
 					offset += 2;
+					prefix_count += 1;
 					continue;
 				}
 				if ep1_op == EP1::EP1_ESP as _ {
 					export_mem = true;
 					gix = arg1 as u8;
 					offset += 2;
+					prefix_count += 1;
 					continue;
 				}
 				if ep1_op == EP1::EP1_SL as _ {
 					load_type = LoadOrdering::LoadSeq;
 					gix = arg1 as u8;
 					offset += 2;
+					prefix_count += 1;
 					continue;
 				}
 				if ep1_op == EP1::EP1_LTL as _ {
 					load_type = LoadOrdering::LoadLock;
 					gix = arg1 as u8;
 					offset += 2;
+					prefix_count += 1;
 					continue;
 				}
 				break;
@@ -480,7 +605,7 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 		break;
 	}
 
-	let main_cp = unsafe { mem_ptr.byte_add(ip as usize + offset).cast::<u16>().read() };
+	let main_cp = fetch(ip + offset as u32)?;
 	offset += 2;
 
 	let (lbs, arg1, arg2) = unpack_6_5_5(main_cp);
@@ -509,7 +634,7 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 		}
 		LB::LB_RDT => {
 			let Some(datakind) = DataKind::from_rdt(arg2) else {
-				panic!("ILLEGAL_OPCODE: RDT with unassigned data type {arg2}")
+				return Err(Fault::new(FaultCause::IllegalOpcode, main_cp as u32));
 			};
 			CanonInsn::SetDataType {
 				dst: arg1 as u8,
@@ -705,9 +830,9 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 			} else if arg2 == EP1::EP1_DISP_ABS as _ {
 				JumpTarget::AbsReg(arg1 as u8)
 			} else {
-				unreachable!()
+				return Err(Fault::new(FaultCause::IllegalOpcode, main_cp as u32));
 			};
-			CanonInsn::PrepareJump { 
+			CanonInsn::PrepareJump {
 				target,
 				link_reg: uto_reg
 			}
@@ -751,7 +876,7 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 				} else if ep2_op == EP2::EP2_TC as _ {
 					CanonInsn::PerformJump
 				} else {
-					unimplemented!("Unknown EP2 main instruction: {}", ep2_op);
+					return Err(Fault::new(FaultCause::IllegalOpcode, main_cp as u32));
 				}
 			} else if ep1_op == EP1::EP1_NEG as _ || ep1_op == EP1::EP1_NOT as _ {
 				let kind = if ep1_op == EP1::EP1_NEG as _ {
@@ -759,7 +884,7 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 				} else if ep1_op == EP1::EP1_NOT as _ {
 					UnaryOp::BitwiseNot
 				} else {
-					unimplemented!("Unknown EP1 main instruction: {}", ep1_op);
+					return Err(Fault::new(FaultCause::IllegalOpcode, main_cp as u32));
 				};
 				CanonInsn::Unary {
 					op: kind,
@@ -767,7 +892,7 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 					on_flags: flag_op
 				}
 			} else if ep1_op == EP1::EP1_LLC_B8 as _ || ep1_op == EP1::EP1_LLC_B16 as _ {
-				let imm = unsafe { mem_ptr.byte_add(ip as usize + offset).cast::<u16>().read() };
+				let imm = fetch(ip + offset as u32)?;
 				offset += 2;
 				let datatype = if ep1_op == EP1::EP1_LLC_B8 as _ { DataKind::U8 } else { DataKind::U16 };
 				CanonInsn::PutImmidiate {
@@ -776,9 +901,9 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 					datakind: datatype,
 				}
 			} else if ep1_op == EP1::EP1_LLC_B32 as _ || ep1_op == EP1::EP1_LLC_F32 as _ {
-				let high = unsafe { mem_ptr.byte_add(ip as usize + offset).cast::<u16>().read() };
+				let high = fetch(ip + offset as u32)?;
 				offset += 2;
-				let low = unsafe { mem_ptr.byte_add(ip as usize + offset).cast::<u16>().read() };
+				let low = fetch(ip + offset as u32)?;
 				offset += 2;
 				let imm = ((high as u32) << 16) | (low as u32);
 				CanonInsn::PutImmidiate {
@@ -787,17 +912,17 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 					datakind: DataKind::U32,
 				}
 			} else {
-				panic!("Unknown EP1 main instruction: {}", ep1_op);
+				return Err(Fault::new(FaultCause::IllegalOpcode, main_cp as u32));
 			}
 		}
-		_ => panic!("Unknown main opcode: {:?}", op),
+		_ => return Err(Fault::new(FaultCause::IllegalOpcode, main_cp as u32)),
 	};
 
-	DecodedInsn {
+	Ok(DecodedInsn {
 		insn,
 		cond: conditional,
 		size_bytes: offset as u32,
-	}
+	})
 }
 
 fn eval_condition(state: &Interpreter, cc: ConditionCode, rix: u8) -> bool {
@@ -823,23 +948,27 @@ fn eval_condition(state: &Interpreter, cc: ConditionCode, rix: u8) -> bool {
 	}
 }
 
-fn interpret_ucode(
-	state: &mut Interpreter,
-) {
-	let mut nisa = Option::<u32>::None;
-	let mut ctrl_trn = false;
-	loop {
-		let ip = if ctrl_trn {
-			ctrl_trn = false;
-			let target = nisa.unwrap();
-			nisa = None;
-			target
-		} else {
-			state.ip
-		};
+impl Interpreter {
+	/// Executes one instruction.
+	///
+	/// Returns `Ok(true)` to continue, `Ok(false)` on `HALT`, or the fault that
+	/// stopped the machine. Faults are precise: nothing this instruction would
+	/// have written is committed.
+	pub fn step(&mut self) -> Result<bool, Fault> {
+		let state = self;
+		// `isa` -- the address of the first code point of the whole prefixed
+		// instruction. Displacements are relative to this, and it is what a
+		// fault reports (spec 1.2).
+		let isa = state.ip;
 
-		let decoded = decode_instruction(state.mem_ptr, ip);
-		let next_ip = ip + decoded.size_bytes;
+		let decoded = match decode_instruction(state.mem_ptr, state.mem_bytes, isa) {
+			Ok(d) => d,
+			Err(f) => return Err(state.take_fault(isa, f)),
+		};
+		let next_ip = isa + decoded.size_bytes;
+		// Advance by default; PerformJump may override.
+		state.ip = next_ip;
+		state.cycles += 1;
 
 		let cond_met = if let Some(cond) = &decoded.cond {
 			eval_condition(state, cond.cc, cond.rix) == !cond.is_inverted
@@ -869,11 +998,9 @@ fn interpret_ucode(
 				}
 				CanonInsn::Load { addr_reg, dst_reg, offset, datakind: datatype, gix: _, ordering: type_ } => {
 					let addr = state.regs[addr_reg as usize].bits.wrapping_add(offset);
-					let ptr = unsafe { state.mem_ptr.byte_add(addr as usize) };
-					let raw = match datatype.width_bytes() {
-						1 => unsafe { ptr.cast::<u8>().read() as u32 },
-						2 => unsafe { ptr.cast::<u16>().read() as u32 },
-						_ => unsafe { ptr.cast::<u32>().read() },
+					let raw = match state.read_mem(addr, datatype.width_bytes()) {
+						Ok(v) => v,
+						Err(f) => return Err(state.take_fault(isa, f)),
 					};
 					// LD8/LD16/LD32 always yield unsigned tags, so this is a
 					// zero-extension today; going through `normalize` keeps the
@@ -882,8 +1009,8 @@ fn interpret_ucode(
 					state.regs[dst_reg as usize].bits = val;
 					state.regs[dst_reg as usize].datatype = datatype;
 
-					if let LoadOrdering::LoadSeq = type_ {
-						core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+					if !matches!(type_, LoadOrdering::Plain) {
+						state.dev.note_removed_ordering_prefix();
 					}
 				}
 				CanonInsn::Copy { src, dst } => {
@@ -893,36 +1020,37 @@ fn interpret_ucode(
 					let addr = state.regs[addr_reg as usize].bits.wrapping_add(offset);
 					let src_val = state.regs[src_reg as usize].bits;
 					let datatype = state.regs[src_reg as usize].datatype;
-					match type_ {
-						StoreOrdering::StoreSeq => {
-							// core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Relaxed);
-						}
-						StoreOrdering::StoreUnLock => {
-							core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
-						}
-						StoreOrdering::Plain => {}
+					if !matches!(type_, StoreOrdering::Plain) {
+						state.dev.note_removed_ordering_prefix();
 					}
-					let ptr = unsafe { state.mem_ptr.byte_add(addr as usize) };
 					// Width comes from the SOURCE register's tag, signed or not.
-					// F32 stores raw bits rather than the old `src_val as f32`,
-					// which was a numeric conversion and part of the float
-					// support the spec now reserves (spec 11).
-					match datatype.width_bytes() {
-						1 => unsafe { ptr.cast::<u8>().write(src_val as u8) },
-						2 => unsafe { ptr.cast::<u16>().write(src_val as u16) },
-						_ => unsafe { ptr.cast::<u32>().write(src_val) },
+					if let Err(f) = state.write_mem(addr, datatype.width_bytes(), src_val) {
+						return Err(state.take_fault(isa, f));
 					}
 				}
 				CanonInsn::ExportMem { .. } | CanonInsn::DropICacheRange { .. } | CanonInsn::Prefetch { .. } => {
 					// No-op or diagnostic log in simulation
 				}
 				CanonInsn::LoadStatusReg { addr, dst, datakind } => {
-					// Virtual status register load
-					unimplemented!()
+					// Port number comes from arg2 (spec 9) -- the opposite
+					// operand from the store form below.
+					let port = state.regs[addr as usize].bits;
+					let (cycles, faults) = (state.cycles, state.faults);
+					match state.dev.read(port, cycles, faults) {
+						Ok(v) => {
+							state.regs[dst as usize].bits = normalize(v, datakind);
+							state.regs[dst as usize].datatype = datakind;
+						}
+						Err(f) => return Err(state.take_fault(isa, f)),
+					}
 				}
-				CanonInsn::StoreStatusReg { .. } => {
-					// Virtual control register store
-					unimplemented!()
+				CanonInsn::StoreStatusReg { addr, src } => {
+					// Port number comes from arg1 here (spec 9).
+					let port = state.regs[addr as usize].bits;
+					let value = state.regs[src as usize].bits;
+					if let Err(f) = state.dev.write(port, value) {
+						return Err(state.take_fault(isa, f));
+					}
 				}
 				CanonInsn::Arith { op, dst, src2, mulw_reg } => {
 					let mut r1 = state.regs[dst as usize];
@@ -985,13 +1113,10 @@ fn interpret_ucode(
 							}
 						},
 						ArithOp::Div => {
-							if both_fp {
-								let res = ((val1 as f32) / (val2 as f32)) as u32;
-								r1.bits = res;
-							} else {
-								let res = val1 / val2;
-								r1.bits = res;
-							}
+							// Cut from v1: a multi-cycle divider is not worth
+							// the area on a 9K part. Do it in software.
+							let f = Fault::bare(FaultCause::DivUnimplemented);
+							return Err(state.take_fault(isa, f));
 						},
 					};
 					state.regs[dst as usize] = r1;
@@ -1004,7 +1129,12 @@ fn interpret_ucode(
 							AluSrc::Reg(r) => {
 								state.regs[r as usize].flags.flag_bit
 							}
-							AluSrc::Imm(_) => panic!("invalid insn"),
+							// FLAG-prefixed logic has no immediate form: there
+							// is no such thing as an immediate flag bit.
+							AluSrc::Imm(_) => {
+								let f = Fault::bare(FaultCause::IllegalPrefixCombo);
+								return Err(state.take_fault(isa, f));
+							}
 						};
 						let res = match op {
 							LogicOp::And => val1 && val2,
@@ -1045,6 +1175,10 @@ fn interpret_ucode(
 					state.regs[dst as usize].bits = res;
 				}
 				CanonInsn::BitExtr { dst, src, start, span } => {
+					if span == 0 {
+						let f = Fault::bare(FaultCause::BextZeroSpan);
+						return Err(state.take_fault(isa, f));
+					}
 					let r1 = state.regs[src as usize];
 					let bits = extract_bits(r1.bits, start as usize, span as usize);
 					let rv = Reg {
@@ -1097,23 +1231,32 @@ fn interpret_ucode(
 					//   XCP a, c : DISPI then
 					//   XCN a, c : DISPI else
 					//   TC
+					if state.nisa.is_some() && state.dev.traps_on_double_prime() {
+						let f = Fault::bare(FaultCause::DoublePrime);
+						return Err(state.take_fault(isa, f));
+					}
+					// Relative to `isa`, the start of the whole prefixed
+					// instruction -- NOT to the already-advanced `state.ip`
+					// (spec 6.2).
 					let target_addr = match target {
-						JumpTarget::RelImm(disp) => state.ip.wrapping_add(disp as u32),
-						JumpTarget::RelReg(r) => state.ip.wrapping_add(state.regs[r as usize].bits),
+						JumpTarget::RelImm(disp) => isa.wrapping_add(disp as u32),
+						JumpTarget::RelReg(r) => isa.wrapping_add(state.regs[r as usize].bits),
 						JumpTarget::AbsReg(r) => state.regs[r as usize].bits,
 					};
 					if let Some(link) = link_reg {
 						state.regs[link as usize].bits = next_ip;
 						state.regs[link as usize].datatype = DataKind::U32;
 					}
-					nisa = Some(target_addr);
+					state.nisa = Some(target_addr);
 				}
 				CanonInsn::Unary { op, target: dst, on_flags } => {
 					let r1 = &mut state.regs[dst as usize];
 					if on_flags {
 						match op {
+							// Negating a single bit is meaningless.
 							UnaryOp::AdditiveInverse => {
-								panic!("invalid insn")
+								let f = Fault::bare(FaultCause::IllegalPrefixCombo);
+								return Err(state.take_fault(isa, f));
 							},
 							UnaryOp::BitwiseNot => {
 								r1.flags.flag_bit = !r1.flags.flag_bit;
@@ -1138,21 +1281,35 @@ fn interpret_ucode(
 					}
 				}
 				CanonInsn::Halt => {
-					break;
+					state.faults.cause = FaultCause::HaltInsn.code();
+					state.faults.addr = isa;
+					return Ok(false);
 				}
 				CanonInsn::Nop => {
 					// Do nothing
 				},
 				CanonInsn::PerformJump => {
-					if let Some(next_ip) = nisa {
-						state.ip = next_ip;
-						ctrl_trn = true;
+					// An unprimed TC is a defined NOP, and must stay one: a
+					// not-taken predicated branch leaves nisa unprimed, so
+					// every conditional branch depends on this (spec 6.5).
+					if let Some(target) = state.nisa.take() {
+						if target % 2 != 0 {
+							let f = Fault::new(FaultCause::MisalignedFetch, target);
+							return Err(state.take_fault(isa, f));
+						}
+						state.ip = target;
 					}
 				}
 			}
 		}
-		if !ctrl_trn {
-			state.ip = next_ip;
-		}
+		Ok(true)
+	}
+
+	/// Latches fault state for the `FAULT_*` ports and returns the fault.
+	fn take_fault(&mut self, isa: u32, fault: Fault) -> Fault {
+		self.faults.cause = fault.cause.code();
+		self.faults.addr = isa;
+		self.faults.info = fault.info;
+		fault
 	}
 }
