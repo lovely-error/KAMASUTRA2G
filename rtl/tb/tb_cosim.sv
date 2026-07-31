@@ -35,7 +35,7 @@ module tb_cosim
   import "DPI-C" function int unsigned k2g_dpi_uart_len();
   import "DPI-C" function int unsigned k2g_dpi_uart_at(input int unsigned i);
 
-  localparam int MEM_BYTES = 16384;
+  localparam int MEM_BYTES = 8192;
 
   logic clk = 0;
   logic rst_n = 0;

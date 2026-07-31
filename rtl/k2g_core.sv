@@ -20,7 +20,7 @@ module k2g_core
   import k2g_pkg::*;
   import k2g_types::*;
 #(
-    parameter int MEM_BYTES = 16384
+    parameter int MEM_BYTES = 8192
 ) (
     input  logic        clk,
     input  logic        rst_n,

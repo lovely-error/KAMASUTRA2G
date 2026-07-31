@@ -11,7 +11,7 @@ module tb_core
   import k2g_types::*;
 ;
 
-  localparam int MEM_BYTES = 16384;
+  localparam int MEM_BYTES = 8192;
 
   logic clk = 0;
   logic rst_n = 0;

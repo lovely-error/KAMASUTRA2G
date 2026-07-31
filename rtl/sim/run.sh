@@ -46,6 +46,14 @@ for f in "$RTL"/k2g_*.sv; do
         *) SOURCES+=("$f") ;;
     esac
 done
+for f in "$RTL"/board/k2g_*.sv; do
+    # The board-level tops instantiate pins and are not simulated here; only
+    # the reusable blocks (the UART) are.
+    case "$(basename "$f")" in
+        k2g_uart.sv) SOURCES+=("$f") ;;
+        *) ;;
+    esac
+done
 for f in "$RTL"/tb/tb_*.sv; do
     [ -e "$f" ] && SOURCES+=("$f")
 done
@@ -55,7 +63,7 @@ done
 RTL_WIN="$(cygpath -m "$RTL" 2>/dev/null || echo "$RTL")"
 
 log="$WORK/vlog.log"
-if ! "$VLOG" -sv -quiet "+incdir+$RTL_WIN" "${SOURCES[@]}" > "$log" 2>&1; then
+if ! "$VLOG" -sv -quiet +define+SIMULATION "+incdir+$RTL_WIN" "${SOURCES[@]}" > "$log" 2>&1; then
     echo "COMPILE FAILED"
     grep -E '^\*\* (Error|Fatal)' "$log" | head -20
     exit 1

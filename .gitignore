@@ -43,3 +43,7 @@ Thumbs.db
 
 # Assembled images for the RTL testbenches
 /rtl/sim/*.bin
+
+# Gowin board build output
+/rtl/board/out/
+/rtl/board/*.bin

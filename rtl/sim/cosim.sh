@@ -45,7 +45,7 @@ for f in "$RTL"/k2g_*.sv; do
 done
 SOURCES+=("$RTL"/tb/tb_*.sv)
 
-if ! "$QUESTA/vlog.exe" -sv -quiet "+incdir+$RTL_WIN" "${SOURCES[@]}" > vlog.log 2>&1 \
+if ! "$QUESTA/vlog.exe" -sv -quiet +define+SIMULATION "+incdir+$RTL_WIN" "${SOURCES[@]}" > vlog.log 2>&1 \
    || grep -qE '^\*\* Error' vlog.log; then
     echo "COMPILE FAILED"
     grep -E '^\*\* Error' vlog.log | head -20
