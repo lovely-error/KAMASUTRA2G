@@ -31,3 +31,6 @@ covhtmlreport/
 *.swp
 Thumbs.db
 .DS_Store
+
+# Gowin SV probe output (regenerate with rtl/sv-probe/run_probe.sh)
+/rtl/sv-probe/out/
