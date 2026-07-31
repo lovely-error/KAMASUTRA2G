@@ -15,7 +15,8 @@ use core::fmt::Write;
 
 use crate::insns::{
 	ARG1_LSB, ARG1_WIDTH, ARG2_LSB, ARG2_WIDTH, CC, CP_WIDTH, EP1, EP2,
-	IMM10_LSB, IMM10_WIDTH, LB, LB_LSB, LB_WIDTH,
+	IMM10_LSB, IMM10_WIDTH, LB, LB_LSB, LB_WIDTH, RDT, RDT_SIGNED_BIT,
+	RDT_WIDTH_MASK,
 };
 
 /// Path the generated package is written to, relative to the repository root.
@@ -68,6 +69,7 @@ fn all_enums() -> Vec<(&'static str, &'static str, u32, &'static [(&'static str,
 		("ep1_e", "EP1", EP1::BITS, EP1::VARIANTS),
 		("ep2_e", "EP2", EP2::BITS, EP2::VARIANTS),
 		("cc_e", "CC", CC::BITS, CC::VARIANTS),
+		("rdt_e", "RDT", RDT::BITS, RDT::VARIANTS),
 	]
 }
 
@@ -160,6 +162,15 @@ pub fn emit_sv() -> String {
 	let _ = writeln!(out);
 	let _ = writeln!(out, "  localparam int REG_COUNT = 32;");
 	let _ = writeln!(out, "  localparam int XLEN      = 32;");
+	let _ = writeln!(out);
+	let _ = writeln!(out, "  // ---- Register data type tag -------------------------------------------");
+	let _ = writeln!(out, "  // rdt_e is a flat enum, but its values carry structure the datapath can");
+	let _ = writeln!(out, "  // use directly: bit {} selects signed interpretation, and the low bits", RDT_SIGNED_BIT);
+	let _ = writeln!(out, "  // give the width code (00=8, 01=16, 10=32, 11=reserved).");
+	let _ = writeln!(out, "  localparam int RDT_W          = {};", RDT::BITS);
+	let _ = writeln!(out, "  localparam int RDT_SIGNED_BIT = {};", RDT_SIGNED_BIT);
+	let _ = writeln!(out, "  localparam logic [{}:0] RDT_WIDTH_MASK = {}'b{:0width$b};",
+		RDT::BITS - 1, RDT::BITS, RDT_WIDTH_MASK, width = RDT::BITS as usize);
 	let _ = writeln!(out);
 
 	for (sv_type, rust_name, bits, variants) in all_enums() {

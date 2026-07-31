@@ -79,12 +79,14 @@ fn opcode_tables_list_every_assigned_encoding() {
 		"| 31 | `11111` | `EP1_EP2` |",
 		"| 25 | `11001` | `EP2_HALT` |",
 		"| 29 | `11101` | `CC_VALUE_ZERO` |",
+		"| 27 | `011011` | `LB_RDT` |",
+		"| 6 | `110` | `RDT_S32` |",
 	] {
 		assert!(md.contains(needle), "opcode table missing row: {needle}");
 	}
 	// Filler encodings are summarized, never listed as rows.
 	assert!(!md.contains("_UNCLAIMED_"), "unassigned encodings should be summarized");
-	assert!(md.contains("Unassigned: 0-27."), "LB unassigned range wrong");
+	assert!(md.contains("Unassigned: 0-26."), "LB unassigned range wrong");
 }
 
 /// The generated file must actually contain the opcode map, not just a header.

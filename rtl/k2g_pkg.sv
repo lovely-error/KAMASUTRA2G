@@ -32,6 +32,14 @@ package k2g_pkg;
   localparam int REG_COUNT = 32;
   localparam int XLEN      = 32;
 
+  // ---- Register data type tag -------------------------------------------
+  // rdt_e is a flat enum, but its values carry structure the datapath can
+  // use directly: bit 2 selects signed interpretation, and the low bits
+  // give the width code (00=8, 01=16, 10=32, 11=reserved).
+  localparam int RDT_W          = 3;
+  localparam int RDT_SIGNED_BIT = 2;
+  localparam logic [2:0] RDT_WIDTH_MASK = 3'b011;
+
   // LB -- 64 variants, 6 bits. Rust: `insns::LB`.
   typedef enum logic [5:0] {
     LB_EP1 = 6'b111111, // 63
@@ -74,7 +82,7 @@ package k2g_pkg;
     LB_XI = 6'b011110, // 30
     LB_XIZEXT = 6'b011101, // 29
     LB_BMX_0_0 = 6'b011100, // 28
-    LB_UNCLAIMED_27 = 6'b011011, // 27
+    LB_RDT = 6'b011011, // 27
     LB_UNCLAIMED_26 = 6'b011010, // 26
     LB_UNCLAIMED_25 = 6'b011001, // 25
     LB_UNCLAIMED_24 = 6'b011000, // 24
@@ -223,6 +231,18 @@ package k2g_pkg;
     CC_UNCLAIMED_1 = 5'b00001, // 1
     CC_UNCLAIMED_0 = 5'b00000 // 0
   } cc_e;
+
+  // RDT -- 8 variants, 3 bits. Rust: `insns::RDT`.
+  typedef enum logic [2:0] {
+    RDT_UNCLAIMED_7 = 3'b111, // 7
+    RDT_S32 = 3'b110, // 6
+    RDT_S16 = 3'b101, // 5
+    RDT_S8 = 3'b100, // 4
+    RDT_F32 = 3'b011, // 3
+    RDT_U32 = 3'b010, // 2
+    RDT_U16 = 3'b001, // 1
+    RDT_U8 = 3'b000 // 0
+  } rdt_e;
 
 endpackage
 

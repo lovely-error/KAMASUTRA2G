@@ -17,7 +17,7 @@ impl Interpreter {
 			mem_ptr,
 			regs: [Reg {
 				bits: 0,
-				datatype: DataKind::B32,
+				datatype: DataKind::U32,
 				flags: Flags { overflow: false, flag_bit: false }
 			}; 32],
 		}
@@ -27,15 +27,51 @@ impl Interpreter {
 	}
 }
 
-fn truncate(
-	bits: u32,
-	datakind: DataKind
-) -> u32 {
+/// Normalizes a value to its register's tag.
+///
+/// **Invariant:** a register's 32 bits always hold its value already extended
+/// according to its tag -- zero-extended for unsigned tags, sign-extended for
+/// signed ones. Every write that sets a tag maintains this, which is what lets
+/// comparisons and arithmetic work on the raw 32 bits without re-deriving the
+/// width each time.
+///
+/// This replaces the older `truncate`, which only ever masked. Masking is still
+/// what happens for unsigned tags; signed tags sign-extend instead.
+pub fn normalize(bits: u32, datakind: DataKind) -> u32 {
 	match datakind {
-		DataKind::B32 => bits,
-		DataKind::B16 => bits & ((1<<16) - 1),
-		DataKind::B8 => bits & ((1<<8) - 1),
-		DataKind::F32 => bits,
+		DataKind::U32 | DataKind::S32 | DataKind::F32 => bits,
+		DataKind::U16 => bits & 0xFFFF,
+		DataKind::U8 => bits & 0xFF,
+		DataKind::S16 => ((bits as i32) << 16 >> 16) as u32,
+		DataKind::S8 => ((bits as i32) << 24 >> 24) as u32,
+	}
+}
+
+impl DataKind {
+	/// Whether this tag denotes a signed integer.
+	pub fn is_signed(self) -> bool {
+		matches!(self, DataKind::S8 | DataKind::S16 | DataKind::S32)
+	}
+
+	/// Access width in bytes. Drives load size and, via the *source* register's
+	/// tag, store size -- there is no `ST8`/`ST16`/`ST32`.
+	pub fn width_bytes(self) -> u32 {
+		match self {
+			DataKind::U8 | DataKind::S8 => 1,
+			DataKind::U16 | DataKind::S16 => 2,
+			DataKind::U32 | DataKind::S32 | DataKind::F32 => 4,
+		}
+	}
+
+	/// Widens to 33 bits according to *this* tag, for mixed-signedness
+	/// comparison (see `docs/isa-spec.md` §5.9).
+	///
+	/// s32 spans [-2^31, 2^31-1] and u32 spans [0, 2^32-1]; their union does
+	/// not fit in 32 bits, so any 32-bit comparator must misorder some pairs.
+	/// One extra bit makes every combination of tags exactly correct, and costs
+	/// about one LUT in hardware since the comparator is already a subtractor.
+	pub fn widen_to_i33(self, bits: u32) -> i64 {
+		if self.is_signed() { (bits as i32) as i64 } else { bits as i64 }
 	}
 }
 
@@ -52,10 +88,35 @@ pub struct Reg {
 	pub flags: Flags
 }
 
+/// Register data type tag. Discriminants match `insns::RDT` exactly, so the
+/// instruction field and this enum are the same encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum DataKind {
-	B32, B16, B8, F32
+	U8  = 0b000,
+	U16 = 0b001,
+	U32 = 0b010,
+	/// Reserved. Raises `FP_UNIMPLEMENTED`; see `docs/isa-spec.md` §11.
+	F32 = 0b011,
+	S8  = 0b100,
+	S16 = 0b101,
+	S32 = 0b110,
+}
+
+impl DataKind {
+	/// Decodes an `RDT` instruction field. `0b111` is unassigned.
+	pub fn from_rdt(value: u16) -> Option<DataKind> {
+		Some(match value & 0b111 {
+			0b000 => DataKind::U8,
+			0b001 => DataKind::U16,
+			0b010 => DataKind::U32,
+			0b011 => DataKind::F32,
+			0b100 => DataKind::S8,
+			0b101 => DataKind::S16,
+			0b110 => DataKind::S32,
+			_ => return None,
+		})
+	}
 }
 
 fn sext_i5(val: u16) -> u32 {
@@ -164,6 +225,13 @@ pub enum CanonInsn {
 		src: u8,
 		dst: u8
 	},
+	/// `RDT rd, kind` -- retag a register and re-normalize its value to the new
+	/// tag. The only way to make a register signed; `PUC*`/`LD*` always produce
+	/// the unsigned variant of their width.
+	SetDataType {
+		dst: u8,
+		datakind: DataKind,
+	},
 	Store {
 		addr_reg: u8,
 		src_reg: u8,
@@ -242,16 +310,22 @@ pub enum CanonInsn {
 	PerformJump,
 }
 
-fn try_decode_xim(code_point: u16) -> Option<u32> {
+/// Decodes an immediate-extension prefix.
+///
+/// Returns the extended value and whether it came from `XIZEXT` (zero-extended)
+/// rather than `XI` (sign-extended). `DISPI` needs to know which, because a
+/// zero-extended prefix must not be re-sign-extended when the 20-bit
+/// displacement is assembled -- see `docs/isa-spec.md` §4.1.
+fn try_decode_xim(code_point: u16) -> Option<(u32, bool)> {
 	let (lbs, imm) = unpack_6_10(code_point);
 	let imm = imm as u32;
 	if lbs == LB::LB_XI as _ {
 		let neg = imm & (1 << 9) != 0;
 		let sexted = if neg { imm | (u32::MAX << 10) } else { imm };
-		return Some(sexted);
+		return Some((sexted, false));
 	}
 	if lbs == LB::LB_XIZEXT as _ {
-		return Some(imm);
+		return Some((imm, true));
 	}
 	return None
 }
@@ -296,6 +370,7 @@ pub struct DecodedInsn {
 
 pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 	let mut extended_imm: Option<u32> = None;
+	let mut imm_was_zext = false;
 	let mut conditional: Option<Conditional> = None;
 	let mut uto_reg: Option<u8> = None;
 	let mut load_type = LoadOrdering::Plain;
@@ -313,8 +388,9 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 	loop {
 		let cp = unsafe { mem_ptr.byte_add(ip as usize + offset).cast::<u16>().read() };
 		
-		if let Some(imm) = try_decode_xim(cp) {
+		if let Some((imm, was_zext)) = try_decode_xim(cp) {
 			extended_imm = Some(imm);
+			imm_was_zext = was_zext;
 			offset += 2;
 			continue;
 		}
@@ -413,9 +489,9 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 	let insn = match op {
 		LB::LB_PUC8 | LB::LB_PUC16 | LB::LB_PUC32 => {
 			let datatype = match op {
-				LB::LB_PUC8 => DataKind::B8,
-				LB::LB_PUC16 => DataKind::B16,
-				LB::LB_PUC32 => DataKind::B32,
+				LB::LB_PUC8 => DataKind::U8,
+				LB::LB_PUC16 => DataKind::U16,
+				LB::LB_PUC32 => DataKind::U32,
 				_ => unreachable!(),
 			};
 			let combined_imm = if let Some(p) = extended_imm {
@@ -425,8 +501,19 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 			};
 			CanonInsn::PutImmidiate {
 				dst_reg: arg1 as u8,
+				// Normalized to the tag at execute time, maintaining the
+				// invariant that a register's bits always match its tag.
 				imm: combined_imm,
 				datakind: datatype,
+			}
+		}
+		LB::LB_RDT => {
+			let Some(datakind) = DataKind::from_rdt(arg2) else {
+				panic!("ILLEGAL_OPCODE: RDT with unassigned data type {arg2}")
+			};
+			CanonInsn::SetDataType {
+				dst: arg1 as u8,
+				datakind,
 			}
 		}
 		LB::LB_CPY => {
@@ -437,9 +524,9 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 		}
 		LB::LB_LD8 | LB::LB_LD16 | LB::LB_LD32 | LB::LB_LDF32 => {
 			let datatype = match op {
-				LB::LB_LD8 => DataKind::B8,
-				LB::LB_LD16 => DataKind::B16,
-				LB::LB_LD32 => DataKind::B32,
+				LB::LB_LD8 => DataKind::U8,
+				LB::LB_LD16 => DataKind::U16,
+				LB::LB_LD32 => DataKind::U32,
 				LB::LB_LDF32 => DataKind::F32,
 				_ => unreachable!(),
 			};
@@ -629,8 +716,15 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 			let (_, imm10) = unpack_6_10(main_cp);
 			let disp = if let Some(p) = extended_imm {
 				let mut d = (p << 10) | (imm10 as u32);
-				if (d & (1 << 19)) != 0 {
+				// An XI prefix means a signed displacement, so sign-extend from
+				// bit 19. XIZEXT means the caller asked for a zero-extended
+				// value and must get one -- previously this extended
+				// unconditionally, so any XIZEXT prefix >= 512 silently
+				// produced a negative displacement (spec 4.1).
+				if !imm_was_zext && (d & (1 << 19)) != 0 {
 					d |= 0xfff00000;
+				} else if imm_was_zext {
+					d &= 0x000fffff;
 				}
 				d as i32
 			} else {
@@ -675,7 +769,7 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 			} else if ep1_op == EP1::EP1_LLC_B8 as _ || ep1_op == EP1::EP1_LLC_B16 as _ {
 				let imm = unsafe { mem_ptr.byte_add(ip as usize + offset).cast::<u16>().read() };
 				offset += 2;
-				let datatype = if ep1_op == EP1::EP1_LLC_B8 as _ { DataKind::B8 } else { DataKind::B16 };
+				let datatype = if ep1_op == EP1::EP1_LLC_B8 as _ { DataKind::U8 } else { DataKind::U16 };
 				CanonInsn::PutImmidiate {
 					dst_reg: arg1 as u8,
 					imm: imm as u32,
@@ -690,7 +784,7 @@ pub fn decode_instruction(mem_ptr: *const (), ip: u32) -> DecodedInsn {
 				CanonInsn::PutImmidiate {
 					dst_reg: arg1 as u8,
 					imm,
-					datakind: DataKind::B32,
+					datakind: DataKind::U32,
 				}
 			} else {
 				panic!("Unknown EP1 main instruction: {}", ep1_op);
@@ -757,24 +851,34 @@ fn interpret_ucode(
 			match decoded.insn {
 				CanonInsn::PutImmidiate { dst_reg, imm, datakind: datatype } => {
 					let reg = Reg {
-						bits: imm, 
+						// Truncated/extended to the tag, so the register's bits
+						// always match what its tag claims (spec 5.1).
+						bits: normalize(imm, datatype),
 						datatype: datatype,
-						flags: Flags { 
-							overflow: false, 
+						flags: Flags {
+							overflow: false,
 							flag_bit: false,
 						}
 					};
 					state.regs[dst_reg as usize] = reg;
 				}
+				CanonInsn::SetDataType { dst, datakind } => {
+					let r = &mut state.regs[dst as usize];
+					r.bits = normalize(r.bits, datakind);
+					r.datatype = datakind;
+				}
 				CanonInsn::Load { addr_reg, dst_reg, offset, datakind: datatype, gix: _, ordering: type_ } => {
 					let addr = state.regs[addr_reg as usize].bits.wrapping_add(offset);
 					let ptr = unsafe { state.mem_ptr.byte_add(addr as usize) };
-					let val = match datatype {
-						DataKind::B8 => unsafe { ptr.cast::<u8>().read() as u32 },
-						DataKind::B16 => unsafe { ptr.cast::<u16>().read() as u32 },
-						DataKind::B32 => unsafe { ptr.cast::<u32>().read() },
-						DataKind::F32 => unsafe { ptr.cast::<u32>().read() }
+					let raw = match datatype.width_bytes() {
+						1 => unsafe { ptr.cast::<u8>().read() as u32 },
+						2 => unsafe { ptr.cast::<u16>().read() as u32 },
+						_ => unsafe { ptr.cast::<u32>().read() },
 					};
+					// LD8/LD16/LD32 always yield unsigned tags, so this is a
+					// zero-extension today; going through `normalize` keeps the
+					// bits-match-tag invariant if signed loads are ever added.
+					let val = normalize(raw, datatype);
 					state.regs[dst_reg as usize].bits = val;
 					state.regs[dst_reg as usize].datatype = datatype;
 
@@ -799,11 +903,14 @@ fn interpret_ucode(
 						StoreOrdering::Plain => {}
 					}
 					let ptr = unsafe { state.mem_ptr.byte_add(addr as usize) };
-					match datatype {
-						DataKind::B8 => unsafe { ptr.cast::<u8>().write(src_val as u8) },
-						DataKind::B16 => unsafe { ptr.cast::<u16>().write(src_val as u16) },
-						DataKind::B32 => unsafe { ptr.cast::<u32>().write(src_val) },
-						DataKind::F32 => unsafe { ptr.cast::<f32>().write(src_val as f32) }
+					// Width comes from the SOURCE register's tag, signed or not.
+					// F32 stores raw bits rather than the old `src_val as f32`,
+					// which was a numeric conversion and part of the float
+					// support the spec now reserves (spec 11).
+					match datatype.width_bytes() {
+						1 => unsafe { ptr.cast::<u8>().write(src_val as u8) },
+						2 => unsafe { ptr.cast::<u16>().write(src_val as u16) },
+						_ => unsafe { ptr.cast::<u32>().write(src_val) },
 					}
 				}
 				CanonInsn::ExportMem { .. } | CanonInsn::DropICacheRange { .. } | CanonInsn::Prefetch { .. } => {
@@ -844,13 +951,20 @@ fn interpret_ucode(
 						},
 						ArithOp::Sub => {
 							if both_fp {
-								let res = ((val1 as f32) + (val2 as f32)) as u32;
+								let res = ((val1 as f32) - (val2 as f32)) as u32;
 								r1.bits = res;
 							} else {
-								let val2 = (!val2).wrapping_add(1);
-								let (res, ov) = u32::overflowing_add(val1, val2);
+								// `overflow` means "the true result did not fit",
+								// consistently across ADD (carry out), SUB
+								// (borrow) and MUL (high half nonzero).
+								//
+								// This previously formed the two's complement in
+								// 32 bits, discarding its carry, which made the
+								// flag a not-borrow flag AND left it wrong for
+								// val2 == 0. See spec 5.4.
+								let (res, borrow) = u32::overflowing_sub(val1, val2);
 								r1.bits = res;
-								r1.flags.overflow = ov;
+								r1.flags.overflow = borrow;
 							}
 						},
 						ArithOp::Mul => {
@@ -862,7 +976,7 @@ fn interpret_ucode(
 									let mul_res = (val1 as u64) * (val2 as u64);
 									r1.bits = (mul_res & 0xffffffff) as u32;
 									state.regs[m_reg as usize].bits = (mul_res >> 32) as u32;
-									state.regs[m_reg as usize].datatype = DataKind::B32;
+									state.regs[m_reg as usize].datatype = DataKind::U32;
 								} else {
 									let (res, ov) = u32::overflowing_mul(val1, val2);
 									r1.bits = res;
@@ -927,7 +1041,7 @@ fn interpret_ucode(
 						ShiftOp::LogicalShiftRight => val1.wrapping_shr(val2),
 						ShiftOp::ArithmeticShiftRight => (val1 as i32).wrapping_shr(val2) as u32,
 					};
-					let res = truncate(res, r1.datatype);
+					let res = normalize(res, r1.datatype);
 					state.regs[dst as usize].bits = res;
 				}
 				CanonInsn::BitExtr { dst, src, start, span } => {
@@ -935,7 +1049,7 @@ fn interpret_ucode(
 					let bits = extract_bits(r1.bits, start as usize, span as usize);
 					let rv = Reg {
 						bits: bits,
-						datatype: DataKind::B32,
+						datatype: DataKind::U32,
 						flags: Flags { 
 							overflow: false,
 							flag_bit: false,
@@ -950,68 +1064,39 @@ fn interpret_ucode(
 				}
 				CanonInsn::Compare { op, lhs, rhs } => {
 					let r1 = state.regs[lhs as usize];
-					let val1 = r1.bits;
-					let mut both_fp = false;
-					let val2 = match rhs {
+					// Both operands widen to 33 bits according to their OWN tag,
+					// then compare as signed. s32 spans [-2^31, 2^31-1] and u32
+					// spans [0, 2^32-1]; their union needs 33 bits, so a 32-bit
+					// comparator would have to misorder some mixed-tag pairs.
+					// One extra bit makes every tag combination exact. See
+					// docs/isa-spec.md 5.9.
+					let a = r1.datatype.widen_to_i33(r1.bits);
+					let b = match rhs {
 						CmpSrc::Reg(r) => {
 							let r2 = state.regs[r as usize];
-							if matches!((r1.datatype,r2.datatype), (DataKind::F32, DataKind::F32)) {
-								both_fp = true;
-							}
-							r2.bits
-						},
-						CmpSrc::Imm(imm) => {
-							imm
-						},
+							r2.datatype.widen_to_i33(r2.bits)
+						}
+						// An immediate carries no tag of its own, so it takes
+						// the left operand's interpretation.
+						CmpSrc::Imm(imm) => r1.datatype.widen_to_i33(imm),
 					};
 					let res = match op {
-						ComparisonKind::Equal => {
-							if both_fp {
-								(val1 as f32) == (val2 as f32)
-							} else {
-								val1 == val2
-							}
-						},
-						ComparisonKind::NotEqual => {
-							if both_fp {
-								(val1 as f32) != (val2 as f32)
-							} else {
-								val1 != val2
-							}
-						},
-						ComparisonKind::Greater => {
-							if both_fp {
-								(val1 as f32) > (val2 as f32)
-							} else {
-								val1 > val2
-							}
-						},
-						ComparisonKind::GreaterOrEq => {
-							if both_fp {
-								(val1 as f32) >= (val2 as f32)
-							} else {
-								val1 >= val2
-							}
-						},
-						ComparisonKind::Less => {
-							if both_fp {
-								(val1 as f32) < (val2 as f32)
-							} else {
-								val1 < val2
-							}
-						},
-						ComparisonKind::LessOrEq => {
-							if both_fp {
-								(val1 as f32) <= (val2 as f32)
-							} else {
-								val1 <= val2
-							}
-						},
+						ComparisonKind::Equal => a == b,
+						ComparisonKind::NotEqual => a != b,
+						ComparisonKind::Greater => a > b,
+						ComparisonKind::GreaterOrEq => a >= b,
+						ComparisonKind::Less => a < b,
+						ComparisonKind::LessOrEq => a <= b,
 					};
 					state.regs[lhs as usize].flags.flag_bit = res;
 				}
 				CanonInsn::PrepareJump { target, link_reg } => {
-					if nisa.is_some() { panic!("double priming of nisa") }
+					// Double priming is legal: the last prime wins. `nisa` is a
+					// plain latch, so overwriting costs nothing, and it makes
+					// the two-target idiom below well defined:
+					//   XCP a, c : DISPI then
+					//   XCN a, c : DISPI else
+					//   TC
 					let target_addr = match target {
 						JumpTarget::RelImm(disp) => state.ip.wrapping_add(disp as u32),
 						JumpTarget::RelReg(r) => state.ip.wrapping_add(state.regs[r as usize].bits),
@@ -1019,7 +1104,7 @@ fn interpret_ucode(
 					};
 					if let Some(link) = link_reg {
 						state.regs[link as usize].bits = next_ip;
-						state.regs[link as usize].datatype = DataKind::B32;
+						state.regs[link as usize].datatype = DataKind::U32;
 					}
 					nisa = Some(target_addr);
 				}
@@ -1042,12 +1127,12 @@ fn interpret_ucode(
 									r1.bits = v as u32;
 								} else {
 									let v = (!r1.bits).wrapping_add(1);
-									r1.bits = truncate(v, r1.datatype);
+									r1.bits = normalize(v, r1.datatype);
 								}
 							},
 							UnaryOp::BitwiseNot => {
 								let v = !r1.bits;
-								r1.bits = truncate(v, r1.datatype);
+								r1.bits = normalize(v, r1.datatype);
 							},
 						}
 					}

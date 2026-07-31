@@ -11,7 +11,7 @@ implementation. The same enums generate `rtl/k2g_pkg.sv`.
 
 ## `LB` — 6 bits
 
-Rust `insns::LB`, SystemVerilog `k2g_pkg::lb_e`. 36 of 64 encodings assigned.
+Rust `insns::LB`, SystemVerilog `k2g_pkg::lb_e`. 37 of 64 encodings assigned.
 
 | Dec | Bin | Name |
 |----:|-----|------|
@@ -51,8 +51,9 @@ Rust `insns::LB`, SystemVerilog `k2g_pkg::lb_e`. 36 of 64 encodings assigned.
 | 30 | `011110` | `LB_XI` |
 | 29 | `011101` | `LB_XIZEXT` |
 | 28 | `011100` | `LB_BMX_0_0` |
+| 27 | `011011` | `LB_RDT` |
 
-Unassigned: 0-27.
+Unassigned: 0-26.
 
 ## `EP1` — 5 bits
 
@@ -108,4 +109,20 @@ Rust `insns::CC`, SystemVerilog `k2g_pkg::cc_e`. 5 of 32 encodings assigned.
 | 27 | `11011` | `CC_VALUE_POSITIVE` |
 
 Unassigned: 0-26.
+
+## `RDT` — 3 bits
+
+Rust `insns::RDT`, SystemVerilog `k2g_pkg::rdt_e`. 7 of 8 encodings assigned.
+
+| Dec | Bin | Name |
+|----:|-----|------|
+| 6 | `110` | `RDT_S32` |
+| 5 | `101` | `RDT_S16` |
+| 4 | `100` | `RDT_S8` |
+| 3 | `011` | `RDT_F32` |
+| 2 | `010` | `RDT_U32` |
+| 1 | `001` | `RDT_U16` |
+| 0 | `000` | `RDT_U8` |
+
+Unassigned: 7.
 

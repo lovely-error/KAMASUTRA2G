@@ -31,21 +31,29 @@ mod tests {
 		// 1. Load small positive constant (10) to Reg 1 (B32)
 		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b32(1, 10));
 		
-		// 2. Load small negative constant (-1, encoded as 31) to Reg 2 (B16)
+		// 2. Load small negative constant (-1, encoded as 31) to Reg 2 (U16).
+		//    The immediate sign-extends to 0xFFFFFFFF, then normalizes to the
+		//    U16 tag, giving 0xFFFF -- constants are truncated to their tag.
 		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b16(2, -1));
-		
+
 		// 3. Load large constant (0x12345678) to Reg 3 (B32) using LLC
 		write_code(mem.as_mut_ptr(), &mut offset, &encode_llc_b32(3, 0x12345678));
-		
-		// 4. Halt
+
+		// 4. Same constant into Reg 4, then retag as signed 16-bit. RDT
+		//    re-normalizes, so 0xFFFF sign-extends back out to -1.
+		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b16(4, -1));
+		write_code(mem.as_mut_ptr(), &mut offset, &encode_rdt(4, RDT::RDT_S16));
+
+		// 5. Halt
 		write_code(mem.as_mut_ptr(), &mut offset, &encode_halt());
 
 		let mut interp = Interpreter::new(mem_ptr);
 		interp.run();
 
-		assert_eq!(interp.regs[1], Reg { bits: 10, datatype: DataKind::B32, flags: Flags { overflow: false, flag_bit: false } });
-		assert_eq!(interp.regs[2], Reg { bits: 0xffffffff, datatype: DataKind::B16, flags: Flags { overflow: false, flag_bit: false } });
-		assert_eq!(interp.regs[3], Reg { bits: 0x12345678, datatype: DataKind::B32, flags: Flags { overflow: false, flag_bit: false } });
+		assert_eq!(interp.regs[1], Reg { bits: 10, datatype: DataKind::U32, flags: Flags { overflow: false, flag_bit: false } });
+		assert_eq!(interp.regs[2], Reg { bits: 0xffff, datatype: DataKind::U16, flags: Flags { overflow: false, flag_bit: false } });
+		assert_eq!(interp.regs[3], Reg { bits: 0x12345678, datatype: DataKind::U32, flags: Flags { overflow: false, flag_bit: false } });
+		assert_eq!(interp.regs[4], Reg { bits: 0xffffffff, datatype: DataKind::S16, flags: Flags { overflow: false, flag_bit: false } });
 	}
 
 	#[test]
@@ -261,10 +269,14 @@ mod tests {
 		// zero = 0 (R5)
 		write_code(mem_ptr, &mut offset, &encode_lc_i5_b32(5, 0));
 
-		// Loop Start (Offset 8)
-		// If R3 is 0, jump to END (Offset 32)
+		// Loop start (offset 8). Displacements are relative to the start of the
+		// whole prefixed instruction -- offset 8 here, not the DISPI at 10 --
+		// and are scaled by 2. See docs/isa-spec.md 6.2.
+		//
+		// If R3 is 0, exit to HALT at offset 30: (30 - 8) / 2 = 11.
+		let loop_top = offset;
 		write_code(mem_ptr, &mut offset, &encode_xcp(3, CC::CC_VALUE_ZERO));
-		write_code(mem_ptr, &mut offset, &encode_disp_imm(10)); // Target = 10 + (10 * 2) = 32
+		write_code(mem_ptr, &mut offset, &encode_disp_imm(11));
 		write_code(mem_ptr, &mut offset, &encode_ctrl_trn());
 
 		// temp = a + b (R4 = R1 + R2)
@@ -280,12 +292,25 @@ mod tests {
 		// count = count - 1 (R3 = R3 - 1)
 		write_code(mem_ptr, &mut offset, &encode_add_ri(3, -1));
 
-		// Jump Loop
-		write_code(mem_ptr, &mut offset, &encode_disp_imm(-10)); // Target = 28 - (10 * 2) = 8
+		// Jump back to the loop top at offset 8, from this instruction at 26:
+		// (8 - 26) / 2 = -9.
+		let back_isa = offset;
+		write_code(mem_ptr, &mut offset, &encode_disp_imm(-9));
 		write_code(mem_ptr, &mut offset, &encode_ctrl_trn());
 
-		// End (Offset 32)
+		// End
+		let halt_addr = offset;
 		write_code(mem_ptr, &mut offset, &encode_halt());
+
+		// Both displacements previously landed one code point short of their
+		// stated intent -- the forward branch on the loop's TC rather than the
+		// HALT, the backward branch on a dead initialization rather than the
+		// loop top. The program still returned 55, by two coincidences.
+		assert_eq!(loop_top, 8);
+		assert_eq!(back_isa, 26);
+		assert_eq!(halt_addr, 30);
+		assert_eq!(loop_top as isize + (11 << 1), halt_addr as isize, "forward branch reaches HALT");
+		assert_eq!(back_isa as isize + (-9 << 1), loop_top as isize, "backward branch reaches the loop top");
 
 		let mut interp = Interpreter::new(mem_ptr as _);
 		interp.run();

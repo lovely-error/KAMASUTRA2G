@@ -10,6 +10,7 @@
 /// the generator needs to emit `typedef enum logic [BITS-1:0]`.
 macro_rules! isa_enum {
 	(
+		$(#[$meta:meta])*
 		$vis:vis enum $name:ident : $bits:literal {
 			$( $variant:ident = $value:expr ),* $(,)?
 		}
@@ -17,6 +18,7 @@ macro_rules! isa_enum {
 		#[allow(nonstandard_style)]
 		#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 		#[repr(u16)]
+		$(#[$meta])*
 		$vis enum $name {
 			$( $variant = $value ),*
 		}
@@ -88,7 +90,7 @@ pub enum LB : 6 {
   LB_XI = 0b011110, // 30
   LB_XIZEXT = 0b011101, // 29
   LB_BMX_0_0 = 0b011100, // 28
-  LB_UNCLAIMED_27 = 0b011011, // 27
+  LB_RDT = 0b011011, // 27
   LB_UNCLAIMED_26 = 0b011010, // 26
   LB_UNCLAIMED_25 = 0b011001, // 25
   LB_UNCLAIMED_24 = 0b011000, // 24
@@ -247,6 +249,35 @@ pub enum CC : 5 {
 
 }
 }
+
+isa_enum! {
+/// Register data type tag. Named `RDT` after the author's original enum in the
+/// superseded generator (`docs/attic/gen_enum.rs`), extended from 4 entries to
+/// 8 to carry signedness.
+///
+/// The values are chosen so that although this is a flat enum, it still has
+/// exploitable structure -- the RTL may read it either way:
+///
+/// ```text
+///   bit 2      : 0 = unsigned, 1 = signed
+///   bits [1:0] : 00 = 8-bit, 01 = 16-bit, 10 = 32-bit, 11 = reserved
+/// ```
+pub enum RDT : 3 {
+  RDT_UNCLAIMED_7 = 0b111, // 7
+  RDT_S32 = 0b110, // 6
+  RDT_S16 = 0b101, // 5
+  RDT_S8 = 0b100, // 4
+  RDT_F32 = 0b011, // 3
+  RDT_U32 = 0b010, // 2
+  RDT_U16 = 0b001, // 1
+  RDT_U8 = 0b000 // 0
+}
+}
+
+/// Bit within an `RDT` value that selects signed interpretation.
+pub const RDT_SIGNED_BIT: u32 = 2;
+/// Mask selecting the width code within an `RDT` value.
+pub const RDT_WIDTH_MASK: u16 = 0b011;
 
 // ---- Code point field layout ----
 //
@@ -482,6 +513,19 @@ pub fn encode_ld_seq_b8(rix1: u16, rix2: u16, gix: u16) -> [u16;2] {
 	[
 		pack_6_5_5(LB::LB_EP1 as _, gix, EP1::EP1_SL as _),
 		pack_6_5_5(LB::LB_LD8 as _, rix1, rix2),
+	]
+}
+
+/// `RDT rd, kind` -- set the register's data type tag and re-normalize its
+/// value to that tag (sign- or zero-extending from the tag's width).
+///
+/// This is the only way to make a register signed: `PUC*` and `LD*` set the
+/// unsigned variant of their width, so a sign-extended byte load is
+/// `LD8 rd, [ra]` followed by `RDT rd, RDT_S8`.
+pub fn encode_rdt(rix1: u16, kind: RDT) -> [u16;1] {
+	assert!(reg_index_in_bounds(rix1 as usize));
+	[
+		pack_6_5_5(LB::LB_RDT as _, rix1, kind as _)
 	]
 }
 

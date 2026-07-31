@@ -31,15 +31,34 @@ ordinary. Each register holds **36 bits** of architectural state:
 | Field | Width | Meaning |
 |---|---|---|
 | `bits` | 32 | The value |
-| `datatype` | 2 | Width tag: `B8`, `B16`, `B32` (`F32` — see §11) |
+| `datatype` | 3 | Type tag — see below |
 | `overflow` | 1 | Set by `ADD`/`SUB`/`MUL` |
 | `flag_bit` | 1 | Set by comparisons; operand of `FLAG`-prefixed logic |
+
+### 1.1.1 The type tag
+
+The tag is a flat 3-bit enum (`RDT` in `insns.rs`, `rdt_e` in the generated
+package), but its values are assigned so the datapath can also read it structurally:
+
+```
+  bit 2      : 0 = unsigned, 1 = signed
+  bits [1:0] : 00 = 8-bit, 01 = 16-bit, 10 = 32-bit, 11 = reserved
+```
+
+giving `U8 U16 U32 S8 S16 S32`, plus `F32` (reserved, §11) and one unassigned encoding.
+
+**Invariant — bits always match the tag.** A register's 32 bits always hold its value already
+extended according to its tag: zero-extended for unsigned tags, sign-extended for signed ones.
+Every write that sets a tag maintains this. [N]
+
+This invariant is what lets arithmetic, shifts and comparisons operate on the raw 32 bits without
+re-deriving the width, and it makes several previously ad-hoc rules fall out for free (§5.7).
 
 **The tag and flags are per-register, not global.** This is the single most consequential
 difference from a conventional ISA and it shapes the whole implementation:
 
 - `ST` takes its **width from the source register's tag**, not from the opcode. [E]
-- Shifts and unary ops **truncate to the destination register's tag**. [E]
+- Shifts and unary ops **normalize to the destination register's tag**. [E]
 - Comparisons write **only `flag_bit` of the left-hand register** — not its value, not `overflow`,
   not its tag. [E]
 - Predication reads the flags *or the value* of an **arbitrary** register named in the prefix, not
@@ -169,14 +188,14 @@ Without an `XI` prefix:
 - `SHLI`/`SHRI`/`SHRAI` take `arg2` as a raw unsigned 5-bit shift amount and **ignore `XI`
   entirely**. [E]
 
-### 4.1 `XIZEXT` + `DISPI` still sign-extends
+### 4.1 `XI` and `XIZEXT` extend as their names say
 
-The `DISPI` path re-sign-extends the assembled 20-bit displacement from bit 19 **unconditionally**,
-regardless of whether the prefix was `XI` or `XIZEXT`. A "zero-extended" prefix value ≥ 512
-therefore produces a **negative** displacement. [E]
+The assembled 20-bit `DISPI` displacement is sign-extended from bit 19 **only when the prefix was
+`XI`**. An `XIZEXT` prefix yields a zero-extended displacement. [N]
 
-This is surprising but free to reproduce in hardware (just sign-extend from bit 19) and expensive
-to rediscover, so it is specified rather than fixed.
+*Previously the `DISPI` path sign-extended unconditionally, so an `XIZEXT` prefix value ≥ 512
+silently produced a negative displacement — a zero-extension prefix that could make things
+negative. Fixed rather than specified.*
 
 ### 4.2 Long constants
 
@@ -191,14 +210,18 @@ instruction stream. [E]
 
 ### 5.1 Put constant
 
-`PUC8`/`PUC16`/`PUC32` write the immediate and set the destination tag to `B8`/`B16`/`B32`.
+`PUC8`/`PUC16`/`PUC32` write the immediate and set the destination tag to `U8`/`U16`/`U32`.
 
-**The value is not truncated to the tag.** `PUC16` with an all-ones immediate yields
-`bits = 0xFFFFFFFF, tag = B16`. [E] Only shifts and unary ops truncate.
+**The value is normalized to the tag**, maintaining §1.1.1's invariant. `PUC16 rd, -1`
+sign-extends the 5-bit immediate to `0xFFFFFFFF`, then masks to the `U16` tag, giving
+`bits = 0xFFFF`. [N]
+
+*This previously stored the untruncated value, so a register could hold bits its tag said were
+impossible.*
 
 ### 5.2 Copy
 
-`CPY` is a **full 36-bit move** — value, tag, and both flag bits. [E]
+`CPY` is a **full move** — value, tag, and both flag bits. [E]
 
 ### 5.3 Load and store
 
@@ -214,28 +237,21 @@ Address = `regs[addr_reg].bits + offset`, wrapping. Both must be naturally align
 immediate (§4). The destination is also the first source — **back-to-back dependencies are the
 normal case in this ISA**, which is why a short pipeline suits it.
 
-`overflow` is written by `ADD`, `SUB`, and non-widening `MUL`. [E]
+`overflow` is written by `ADD`, `SUB`, and non-widening `MUL`, with **one consistent meaning: the
+true result did not fit in 32 bits.** [N]
 
-**On `SUB`, `overflow` is misnamed — it is a not-borrow (carry) flag, not signed overflow.** It is
-set exactly when no borrow occurs, i.e. when `a >= b`, **except for `b == 0`, where it is
-incorrectly clear**. [E]
+| Op | `overflow` set when |
+|---|---|
+| `ADD` | carry out of bit 31 |
+| `SUB` | a borrow occurred, i.e. `a < b` |
+| `MUL` | the high half of the 64-bit product is nonzero |
 
-| `a` | `b` | result | `overflow` | borrow? |
-|---:|---:|---:|---|---|
-| 7 | 0 | 7 | **0** | no — *the anomaly* |
-| 5 | 3 | 2 | 1 | no |
-| 10 | 10 | 0 | 1 | no |
-| 3 | 5 | −2 | 0 | yes |
+In hardware, `SUB` is `cout(a + ~b + 1)` inverted — the standard borrow — with no special case.
 
-The anomaly arises because the emulator forms the two's complement of the right operand in 32
-bits — *discarding the carry* — so `~0 + 1 == 0`, and adding zero never carries. A hardware
-`a + ~b + 1` would produce `cout = 1` here. The correct hardware form is therefore:
-
-```
-overflow_sub = cout(a + ~b + 1) & (src2 != 0)     // equivalently: (a >= b) && (b != 0)
-```
-
-Note `ADD` is unaffected: its `overflow` is the ordinary unsigned carry-out.
+*This previously formed the two's complement of the right operand in 32 bits, discarding its
+carry, and took the carry of the subsequent addition. That made the flag a **not**-borrow flag,
+and because `~0 + 1` wraps to 0, it was additionally wrong for `b == 0`. Both are fixed. Note
+`SUB` has no `encode_sub` helper and had no test, which is how this survived.*
 
 `DIV` by zero is undefined in the emulator (it panics). Under this specification `DIV` raises
 `DIV_UNIMPLEMENTED` (§11). [N]
@@ -243,7 +259,7 @@ Note `ADD` is unaffected: its `overflow` is the ordinary unsigned carry-out.
 ### 5.5 Widening multiply
 
 `UTO` + `MUL` computes the full 64-bit product: low half to `dst`, high half to the `UTO` register
-(whose tag is set to `B32`).
+(whose tag is set to `U32`).
 
 Two details that differ from plain `MUL`: [E]
 
@@ -268,9 +284,17 @@ Two details that differ from plain `MUL`: [E]
 `SHL`, `SHR`, `SHRA` (register amount) and `SHLI`, `SHRI`, `SHRAI` (5-bit immediate amount).
 
 - **Shift amounts are masked to 5 bits.** [E]
-- **The result is truncated to the destination's tag.** [E]
-- **`SHRA` sign-extends from bit 31 regardless of the tag**, and only then truncates. So `SHRA` on
-  a `B8`-tagged register sign-fills from bit 31 and masks to 8 bits. [E]
+- **The result is normalized to the destination's tag.** [E]
+- **`SHRA` is a 32-bit arithmetic shift**, which now follows the tag's signedness automatically
+  rather than by special case. [N]
+
+That last point falls out of §1.1.1's invariant rather than being a rule of its own: a signed-tagged
+register's bits are already sign-filled, so a 32-bit arithmetic shift is correct; an unsigned-tagged
+register's value is non-negative, so the arithmetic shift degenerates to a logical one, which is
+also correct. Concretely, `255` as `U8` shifted right by 4 gives `15`, while `-1` as `S8` stays `-1`.
+
+*Previously `SHRA` sign-extended from bit 31 regardless of tag, so the same `0xFF` byte behaved
+differently depending on whether the untruncated bits above it happened to be set.*
 
 ### 5.8 Bit field extract and insert
 
@@ -280,7 +304,7 @@ Two details that differ from plain `MUL`: [E]
 
 They write different amounts of state: [E]
 
-- **Extract writes the whole register** — value, tag ← `B32`, both flags ← 0.
+- **Extract writes the whole register** — value, tag ← `U32`, both flags ← 0.
 - **Insert writes only the value.**
 
 `span == 0` is asymmetric in the emulator: extract asserts, insert is a silent no-op. This
@@ -293,11 +317,49 @@ preserving the observed insert behaviour and making the extract case an explicit
 
 `TST` (=), `TSTN` (≠), `LT`, `GT`, `LTE`, `GTE`.
 
-**All comparisons are unsigned.** [E] Combined with §4 this has a sharp edge: `XI` *sign-extends*
-the immediate, which is then compared *unsigned* — so comparing against `-1` compares against
-`0xFFFFFFFF`.
+**Each operand is widened to 33 bits according to its own tag — sign-extended if signed,
+zero-extended if unsigned — and the comparison is performed on those 33-bit values.** [N]
+
+This is why signedness lives in the tag: it removes the need for duplicate signed and unsigned
+comparison opcodes.
+
+The 33rd bit is not incidental. `S32` spans [−2³¹, 2³¹−1] and `U32` spans [0, 2³²−1]; their union
+does not fit in 32 bits, so **any** 32-bit comparator must misorder some mixed-tag pairs — this is
+exactly the trap behind C's usual arithmetic conversions, where `-1 < 1u` is false. One extra bit
+makes all four tag combinations exactly correct, and costs about one LUT since the comparator is
+already a subtractor.
+
+| lhs | rhs | Result |
+|---|---|---|
+| `-1` (S32) | `1` (U32) | `-1 < 1` — true |
+| `3` (S32) | `0xFFFFFFFF` (U32) | `3 < 4294967295` — true |
+| both signed | | ordinary signed comparison |
+| both unsigned | | ordinary unsigned comparison |
+
+An **immediate carries no tag**, so it takes the left operand's interpretation. Against a `U32`
+register, `XI`'s sign-extended `-1` therefore reads as `0xFFFFFFFF`; against an `S32` register it
+reads as `-1`.
+
+Note this makes `TST`/`TSTN` **value** equality rather than bit-pattern equality: `0xFFFFFFFF`
+tagged `U32` and tagged `S32` denote 4294967295 and −1, and compare unequal. The two only differ
+when the tags disagree in signedness.
 
 The result goes to **`flag_bit` of the left-hand register only**. [E]
+
+### 5.10 Set data type (`RDT`)
+
+`RDT rd, kind` sets the register's tag **and re-normalizes its value to it**, maintaining §1.1.1's
+invariant. [N]
+
+This is the only way to make a register signed — `PUC*` and `LD*` always produce the unsigned
+variant of their width. Two consequences:
+
+- Retagging a truncated unsigned value as signed sign-extends it back out:
+  `PUC16 r1,-1` (→ `0x0000FFFF`, `U16`) then `RDT r1, S16` gives `0xFFFFFFFF`, `S16`.
+- **Sign-extending loads need no new opcodes.** `LD8 rd,[ra]` then `RDT rd, S8` *is* a
+  sign-extending byte load, which is why there is no `LDS8`/`LDS16`.
+
+`RDT` with the unassigned tag encoding `0b111` → `ILLEGAL_OPCODE`.
 
 ---
 
@@ -330,7 +392,7 @@ Displacements are relative to **`isa`**, the start of the whole prefixed instruc
 ### 6.3 Link register
 
 `UTO` + `DISP`/`DISPI` writes `isa + instruction_length` to the `UTO` register and sets its tag to
-`B32`. [E]
+`U32`. [E]
 
 Note this is the address of the code point **immediately after the `DISP`**, which in the normal
 idiom is the `TC` itself, not the instruction after it. A return therefore re-executes a `TC`.
@@ -341,8 +403,8 @@ That is harmless (§6.5) but must be understood when defining a calling conventi
 All instruction fetch is halfword-aligned. `DISPI` shifts by 1 so it cannot produce an odd target;
 `DISP_OFF`/`DISP_ABS` can. An odd target raises `MISALIGNED_FETCH` at `PerformJump`. [N]
 
-Data accesses must be naturally aligned — `LD32`/`ST` of a `B32` source require `addr[1:0] == 0`,
-`LD16`/`ST` of a `B16` source require `addr[0] == 0`, `B8` is always legal. Otherwise
+Data accesses must be naturally aligned — `LD32`/`ST` of a 32-bit-tagged source require `addr[1:0] == 0`,
+`LD16`/`ST` of a 16-bit-tagged source require `addr[0] == 0`, 8-bit is always legal. Otherwise
 `MISALIGNED_LOAD` / `MISALIGNED_STORE`. [N]
 
 *Rationale: the emulator currently performs unaligned reads via `ptr.cast::<u32>().read()`, which
@@ -353,17 +415,25 @@ is undefined behaviour in Rust and merely happens to work on x86. Supporting it 
 
 If `nisa` is not valid, `PerformJump` does nothing and execution falls through. [E]
 
-**This must not be "fixed".** It is load-bearing: in the reference `test_fibonacci` program the
-predicated forward branch targets the `TC` code point itself, and the program only produces the
-right answer because that `TC` finds `nisa` empty and falls through.
+**This is structural — it is what makes conditional branches possible.** The standard form of a
+predicated branch is:
+
+```
+XCP rA, cond : DISPI target
+TC
+```
+
+When the predicate is false the `DISPI` is suppressed, so `nisa` is never primed and the `TC` must
+do nothing. Were an unprimed `TC` a fault or anything other than a NOP, this idiom — and with it
+every conditional branch — would break.
 
 ### 6.6 Double priming
 
 Two `PrepareJump`s without an intervening `PerformJump`: **the last one wins**. [N]
-(*the emulator panics*)
+(*the emulator previously panicked*)
 
-This costs nothing in hardware — `nisa` is a plain register — and it legalizes a genuinely useful
-idiom for selecting between two targets:
+This costs nothing in hardware — `nisa` is a plain latch — and it makes the two-target select
+idiom well defined:
 
 ```
 XCP rA, FLAG_SET : DISPI  then_target
@@ -371,7 +441,7 @@ XCN rA, FLAG_SET : DISPI  else_target
 TC
 ```
 
-A `COMPAT_FLAGS` bit (§9) restores the trap-on-double-prime behaviour for emulator-parity testing.
+A `COMPAT_FLAGS` bit (§9) restores trap-on-double-prime for differential testing.
 
 ### 6.7 Halt
 
@@ -421,7 +491,7 @@ machine halts, and four values latch:
 
 | Code | Name | Raised by |
 |---|---|---|
-| 0x01 | `ILLEGAL_OPCODE` | unassigned `LB`/`EP1`/`EP2` encoding; `DISP` with bad `arg2` |
+| 0x01 | `ILLEGAL_OPCODE` | unassigned `LB`/`EP1`/`EP2` encoding; `DISP` with bad `arg2`; `RDT` with tag `0b111` |
 | 0x02 | `ILLEGAL_PREFIX_COMBO` | `BMX`+`SHRA`; `FLAG`+non-logic; `FLAG`+immediate; `FLAG`+`NEG`; `CSP`+non-memory; unassigned condition code |
 | 0x03 | `PREFIX_CHAIN_TOO_LONG` | more than 7 prefix code points |
 | 0x04 | `DIV_UNIMPLEMENTED` | `DIV` (§11) |
@@ -520,32 +590,59 @@ emulator. Until then it faults.
 Collected for implementers. Each is cheap to reproduce when known, and a long debugging session
 when not. All are [E] unless marked.
 
-1. `SUB`'s `overflow` is a not-borrow flag, and is wrong when subtracting 0 — §5.4.
-2. Comparisons are unsigned, but `XI` sign-extends — §5.9, §4.
-3. `XI` combines three different ways depending on the main opcode — §4.
-4. `XIZEXT` + `DISPI` yields negative displacements for prefix values ≥ 512 — §4.1.
-5. `PUC*` does not truncate to its own tag — §5.1.
-6. `SHRA` sign-extends from bit 31 regardless of tag, then truncates — §5.7.
-7. Immediate shifts ignore `XI` — §4.
-8. `LLC_B32` is high-halfword-first — §4.2.
-9. Widening `MUL` writes no `overflow`; plain `MUL` does; on aliasing, low wins — §5.5.
-10. Extract writes value+tag+flags; insert writes only the value — §5.8.
-11. `CPY` copies tag and flags too — §5.2.
-12. Comparisons write only `flag_bit` of the left operand — §5.9.
-13. `PerformJump` with empty `nisa` is a NOP and must stay one — §6.5.
-14. Displacements are relative to the start of the *whole prefixed instruction* — §6.2.
-15. The link register points at the `TC`, not past it — §6.3.
-16. A false predicate still advances the PC by the full instruction length — §7.
-17. `CSP` load and store take the port number from *different* operand positions — §9.
+1. `XI` combines three different ways depending on the main opcode — §4.
+2. Immediate shifts ignore `XI` entirely — §4.
+3. `LLC_B32` is high-halfword-first, inside a little-endian stream — §4.2.
+4. An immediate in a comparison takes the **left operand's** signedness — §5.9.
+5. `TST`/`TSTN` are value equality, not bit-pattern equality — §5.9.
+6. Widening `MUL` writes no `overflow`; plain `MUL` does; on aliasing, low wins — §5.5.
+7. Extract writes value+tag+flags; insert writes only the value — §5.8.
+8. `CPY` copies tag and flags too — §5.2.
+9. Comparisons write only `flag_bit` of the left operand — §5.9.
+10. `PerformJump` with empty `nisa` is a NOP — required by predicated branches — §6.5.
+11. Displacements are relative to the start of the *whole prefixed instruction* — §6.2.
+12. `DISP_OFF`'s register displacement is **not** shifted; `DISPI`'s immediate is — §6.2.
+13. The link register points at the `TC`, not past it — §6.3.
+14. A false predicate still advances the PC by the full instruction length — §7.
+15. `CSP` load and store take the port number from *different* operand positions — §9.
+16. Store width comes from the **source register's** tag, not the opcode — §5.3.
+
+### 12.1 Behaviours that were changed rather than specified
+
+Recorded because earlier drafts of this document specified them as-is, and because the
+old behaviour may still be lurking in notes or prototypes. All are [N].
+
+| Was | Now | §|
+|---|---|---|
+| `SUB`'s `overflow` was a not-borrow flag, wrong for `b == 0` | a plain borrow flag | 5.4 |
+| `PUC*` stored the untruncated value | normalized to the tag | 5.1 |
+| `XIZEXT` + `DISPI` sign-extended anyway | zero-extends as named | 4.1 |
+| `SHRA` sign-extended from bit 31 regardless of tag | follows the tag's signedness | 5.7 |
+| Comparisons were always unsigned | 33-bit widening by each operand's tag | 5.9 |
+| Double priming `nisa` panicked | last prime wins | 6.6 |
+| Float `SUB` computed `a + b` | `F32` is reserved and faults | 11 |
 
 ---
 
 ## Appendix: reference program
 
 `test_fibonacci` in `emu/src/main.rs` is the canonical end-to-end program and the first
-cosimulation vector. Two things about it are deliberate and must not be "corrected":
+cosimulation vector.
 
-- Both of its branch targets land one code point earlier than the source comments suggest. The
-  forward branch targets the `TC` at offset 28 rather than the `HALT` at 30; the backward branch
-  targets offset 6 rather than 8, harmlessly re-executing a register initialization.
-- It produces 55 regardless, and the forward case is the proof that §6.5 must hold.
+**It previously contained a bug worth recording**, because it nearly became specification. Both
+displacements were miscalculated: the forward branch landed on the loop's `TC` at offset 28 rather
+than the `HALT` at 30, and the backward branch landed on offset 6 rather than the loop top at 8,
+re-running a dead initialization each iteration. The author's own comments confirm the intent and
+also disagree with each other about the base address — one computes from the `DISPI` code point,
+the other from the code point after it, and neither from `isa`.
+
+The program still returned 55, by two coincidences: an unprimed `TC` falls through into the
+`HALT`, and the re-run initialization was harmless.
+
+The displacements are now correct (`+11` and `−9`, both relative to `isa` per §6.2), and the test
+asserts the branch arithmetic explicitly so the targets cannot drift again.
+
+The lesson generalizes: this program appeared to demonstrate that §6.5 was load-bearing, but the
+demonstration was an artifact of the bug. §6.5 *is* required — just for the reason given there,
+which the same program exercises legitimately at its other `TC`, on every iteration where the
+loop-exit predicate is false.
