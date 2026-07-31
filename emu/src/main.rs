@@ -1,10 +1,5 @@
-#![feature(coroutine_trait)]
-#![feature(coroutines)]
-
 mod insns;
-mod chan;
 mod interp;
-mod aprox_machine_model;
 
 use interp::Interpreter;
 

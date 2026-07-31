@@ -1,0 +1,6 @@
+[toolchain]
+# Stable is sufficient since the coroutine-based machine-model sketch was
+# removed; nothing in the emulator needs nightly features any more.
+# Pinned so the generated rtl/k2g_defs.svh is reproducible across machines.
+channel = "stable"
+components = ["rustfmt", "clippy"]
