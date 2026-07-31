@@ -99,3 +99,41 @@ silently read back as zeros against a plain `*mut u32` — declare fixed sizes.
 This matters because the whole Phase 4 verification strategy is lockstep
 cosimulation driving the Rust emulator through DPI, so it was proven before any
 RTL was written.
+
+## SSRAM inference — measured, and it decides the pipeline
+
+The 3-stage F/D/X design depends on the register file's value array having an
+**asynchronous** read: that is what lets one decode cycle do register read →
+forward → address add → memory address. A synchronous (BSRAM) read would force
+a fourth stage. So whether GowinSynthesis infers async-read SSRAM matters more
+than any other synthesis question here.
+
+It does, but only from a specific shape. Measured on 32×32 arrays:
+
+| Shape | Result |
+|---|---|
+| 1 write port, 1 async read, no reset | `RAM16SDP4:16` ✅ |
+| 1 write port, **2** async reads, no reset | `RAM16SDP4:32` ✅ |
+| 1 write port, 2 async reads, **reset loop over the array** | `RAM16SDP4:32` plus `RAM16SDP1:8`, `DFFRE:8` and ~85 extra LUTs — infers, but pays for it |
+| **2 write ports** | **no RAM at all** — collapses to flip-flops |
+
+The last row is the one that bites. A first version of `k2g_regfile` added a
+second write port for the widening multiply's high half and the jump link
+register. A RAM cannot have two write ports, so the array became 1120
+flip-flops with ~3700 LUTs of read muxing — against a ~375 LUT budget for the
+whole file.
+
+Both of those writes are already specified as separate cycles (spec 5.5, 6.3),
+so the core serializes them and the array keeps one port:
+
+| | LUT | FF | RAM prims |
+|---|---:|---:|---|
+| two write ports | ~3700 | 1120 | 0 |
+| **one write port** | **~580** | **~112** | `RAM16SDP4:32` |
+
+The value array deliberately has no reset, which is what keeps it clean; the
+tag and flag arrays do reset, because an undefined tag is architecturally
+observable (it decides store width and comparison signedness).
+
+**Rule of thumb: synthesize each module as it is written, not at integration.**
+Both of the significant area surprises so far were invisible in simulation.
