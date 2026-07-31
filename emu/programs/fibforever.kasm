@@ -1,0 +1,142 @@
+; fibforever.kasm -- print Fibonacci numbers forever, one per second.
+;
+; Restarts the sequence when the next term would not fit in 32 bits. That is
+; detected from the ADD's own overflow flag rather than by comparing against a
+; limit, which is what the flag is for: `overflow` means the true result did
+; not fit (spec 5.4). fib(47) = 2971215073 is the last term that fits.
+;
+; Division by ten uses the reciprocal trick rather than repeated subtraction.
+; Subtraction would need up to 297 million iterations for the leading digit of
+; a nine-digit number -- about 45 seconds per digit at 6.75 MHz. The multiply
+; is four instructions regardless of magnitude, and exercises the widening
+; multiply into the bargain.
+
+UART_DATA = 0x00
+
+; floor(n/10) == (n * 0xCCCCCCCD) >> 35 for every 32-bit n. Verified
+; exhaustively over powers of two, their neighbours, 0..100000 and the whole
+; Fibonacci sequence.
+MAGIC     = 0xCCCCCCCD
+
+; The delay loop below is three instructions and measures exactly six clock
+; cycles per iteration in simulation. At 6.75 MHz (the 27 MHz crystal divided
+; by four, see k2g_soc.sv) one second is 6750000 cycles.
+;
+;   6750000 / 6 = 1125000
+;
+; Retune this if CLK_DIV changes. Printing costs about two milliseconds on top,
+; which is below the resolution anyone will notice.
+DELAY     = 1125000
+
+; ---------------------------------------------------------------------------
+; r1  a            r7  digit / character      r12 magic constant
+; r2  b            r8  quotient               r30 link register
+; r3  value        r9  buffer base
+; r4  scratch      r10 UART port
+; r5  buffer ptr   r11 delay counter
+; r6  ten
+; ---------------------------------------------------------------------------
+
+        .org    0
+
+start:
+        puc32   r10, UART_DATA
+        puc32   r9,  buf
+        puc32   r6,  10
+        puc32   r12, MAGIC
+
+restart:
+        puc32   r1, 0
+        puc32   r2, 1
+
+next:
+        cpy     r3, r1
+        uto r30: dispi show             ; call; link lands on the TC below
+        tc
+
+        ; ---- advance: t = a + b, a = b, b = t ----
+        cpy     r4, r1
+        add     r4, r2                  ; sets overflow on carry out of bit 31
+        xcp     r4, overflow: dispi finish
+        tc
+        cpy     r1, r2
+        cpy     r2, r4
+        dispi   next
+        tc
+
+; When a + b overflows, `b` still holds the largest term that fits and has not
+; been shown yet -- the loop prints `a` and is always one term behind. Showing
+; it here is what makes 2971215073 appear; without this the sequence jumps
+; straight from 1836311903 back to zero.
+finish:
+        cpy     r3, r2
+        uto r30: dispi show
+        tc
+        dispi   restart
+        tc
+
+; ---------------------------------------------------------------------------
+; show -- write r3 as unsigned decimal followed by CRLF, then wait one second.
+; Clobbers r3, r4, r5, r7, r8, r11. Returns through r30.
+;
+; Print and delay are one routine so both call sites get both, and the delay
+; loop exists once.
+;
+; Digits come out least significant first, so they are pushed into a buffer
+; and emitted in reverse.
+; ---------------------------------------------------------------------------
+show:
+        cpy     r5, r9                  ; write pointer
+
+digit_loop:
+        ; r8 = r3 / 10
+        cpy     r8, r3
+        mulw    r8, r12, r4             ; r8 = low half, r4 = high half
+        cpy     r8, r4
+        shr     r8, 3                   ; (n * MAGIC) >> 35
+
+        ; r7 = r3 - r8 * 10, the remaining digit
+        cpy     r7, r8
+        mul     r7, r6
+        cpy     r4, r3
+        sub     r4, r7
+        cpy     r7, r4
+        add     r7, '0'
+
+        ; Store width comes from the SOURCE register's tag (spec 5.3), so the
+        ; character has to be tagged as a byte or this writes four.
+        rdt     r7, u8
+        st      [r5], r7
+        add     r5, 1
+
+        cpy     r3, r8
+        xcn     r3, zero: dispi digit_loop
+        tc
+
+emit:
+        add     r5, -1
+        ld8     r7, [r5]
+        out     r10, r7
+        gt      r5, r9                  ; more digits below the pointer?
+        xcp     r5, flag: dispi emit
+        tc
+
+        ; CRLF: a serial terminal does not return the carriage on a bare LF.
+        puc32   r7, 13
+        out     r10, r7
+        puc32   r7, 10
+        out     r10, r7
+
+        ; ---- one second ----
+        puc32   r11, DELAY
+wait:
+        add     r11, -1
+        xcn     r11, zero: dispi wait
+        tc
+
+        dispa   r30
+        tc
+
+        .align  4
+buf:
+        .space  16

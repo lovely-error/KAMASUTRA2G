@@ -107,6 +107,11 @@ module tb_core
     end
   endtask
 
+  // Clock cycles from reset release to halt. Distinct from `cycle_count_o`,
+  // which counts RETIRED INSTRUCTIONS -- the two differ by the stalls, and it
+  // is the clock count that sets wall-clock time.
+  int run_cycles = 0;
+
   // Runs to halt or a step budget.
   task automatic run_program(input int max_cycles);
     int n = 0;
@@ -117,6 +122,7 @@ module tb_core
       @(posedge clk);
       n++;
     end
+    run_cycles = n;
     if (!halted) begin
       $display("TB_FAIL: program did not halt within %0d cycles (pc=%08x)",
                max_cycles, dut.pc);
@@ -147,6 +153,10 @@ module tb_core
 
     $display("uart output: \"%s\"", uart_string());
     $display("instructions: %0d", cycle_count_o);
+    $display("clock cycles: %0d", run_cycles);
+    if (cycle_count_o != 0)
+      $display("cycles/instruction: %0.2f",
+               real'(run_cycles) / real'(cycle_count_o));
 
     if (expect_out != "") begin
       // The plus-arg cannot carry a newline, so compare the printable part.

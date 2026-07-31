@@ -47,3 +47,5 @@ Thumbs.db
 # Gowin board build output
 /rtl/board/out/
 /rtl/board/*.bin
+
+/rtl/board/*.bin

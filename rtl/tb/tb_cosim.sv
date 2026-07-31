@@ -94,6 +94,9 @@ module tb_cosim
 
   string image_path;
   int    max_insns = 200000;
+  // A program that never halts is a legitimate thing to compare: run it to the
+  // instruction budget and pass if the two machines agreed the whole way.
+  logic  forever_ok = 1'b0;
 
   // Latched at retirement. `pc_d` has already moved on by the time the
   // comparison runs, so reporting it alone points at the wrong instruction.
@@ -193,6 +196,7 @@ module tb_cosim
       $finish;
     end
     void'($value$plusargs("max=%d", max_insns));
+    forever_ok = $test$plusargs("forever");
 
     load_both(image_path);
     k2g_dpi_reset(0);
@@ -262,8 +266,12 @@ module tb_cosim
     end
 
     if (retired >= max_insns) begin
-      $display("TB_FAIL: neither machine halted within %0d instructions", max_insns);
-      errors++;
+      if (forever_ok) begin
+        $display("ran %0d instructions in lockstep without divergence", retired);
+      end else begin
+        $display("TB_FAIL: neither machine halted within %0d instructions", max_insns);
+        errors++;
+      end
     end
 
     // UART traffic must match too -- it is the one piece of state the

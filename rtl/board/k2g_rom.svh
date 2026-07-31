@@ -3,6 +3,6 @@
 
 `ifndef K2G_ROM_SVH
 `define K2G_ROM_SVH
-`define K2G_ROM_BYTES 54
-`define K2G_ROM_ADDR_BITS 6
+`define K2G_ROM_BYTES 168
+`define K2G_ROM_ADDR_BITS 8
 `endif
