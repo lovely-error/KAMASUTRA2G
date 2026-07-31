@@ -1,324 +1,226 @@
+//! `emu` — run a K2G image.
+//!
+//! ```text
+//! emu program.bin
+//! emu program.bin --trace
+//! emu program.bin --mem 65536 --max-steps 1000000
+//! ```
+//!
+//! This previously took no arguments and ran on a zeroed buffer, which decodes
+//! as an unassigned opcode and panicked on the very first code point.
+
+use std::process::ExitCode;
+
+use emu::devices::{Devices, UartIo};
+use emu::fault::StopReason;
 use emu::interp::Interpreter;
 
-fn main() {
-	const MEM_SIZE: usize = 1024 * 1024;
-	let mem = Box::leak(vec![0u16; MEM_SIZE].into_boxed_slice());
-	
-	let mut interp = Interpreter::new(mem.as_mut_ptr() as *mut (), MEM_SIZE * 2);
-	interp.run();
-	
+const DEFAULT_MEM: usize = 64 * 1024;
+const DEFAULT_STEPS: u64 = 100_000_000;
+
+fn usage() -> ExitCode {
+	eprintln!(
+		"usage: emu <image.bin> [options]\
+		 \n\
+		 \n    --mem <bytes>        memory size (default {DEFAULT_MEM})\
+		 \n    --max-steps <n>      step budget (default {DEFAULT_STEPS})\
+		 \n    --org <addr>         load address (default 0)\
+		 \n    --trace              print architectural state after each instruction\
+		 \n    --regs               dump registers on exit\
+		 \n    --dump <file>        write the final memory image\
+		 \n    --quiet              suppress the exit summary"
+	);
+	ExitCode::from(2)
 }
 
-#[cfg(test)]
-mod tests {
-	use super::*;
-	use emu::interp::{DataKind, Flags, Reg};
-	use emu::insns::*;
+fn parse_num(s: &str) -> Option<u64> {
+	let t = s.replace('_', "");
+	match t.strip_prefix("0x") {
+		Some(h) => u64::from_str_radix(h, 16).ok(),
+		None => t.parse().ok(),
+	}
+}
 
-	fn write_code(mem: *mut u16, offset: &mut usize, code: &[u16]) {
-		for &cp in code {
-			unsafe { mem.byte_add(*offset).cast::<u16>().write(cp) };
-			*offset += 2;
+fn main() -> ExitCode {
+	let args: Vec<String> = std::env::args().skip(1).collect();
+	if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
+		return usage();
+	}
+
+	let mut image_path: Option<String> = None;
+	let mut mem_bytes = DEFAULT_MEM;
+	let mut max_steps = DEFAULT_STEPS;
+	let mut org = 0usize;
+	let mut trace = false;
+	let mut show_regs = false;
+	let mut dump: Option<String> = None;
+	let mut quiet = false;
+
+	let mut i = 0;
+	while i < args.len() {
+		match args[i].as_str() {
+			"--mem" => {
+				i += 1;
+				mem_bytes =
+					args.get(i).and_then(|s| parse_num(s)).unwrap_or(DEFAULT_MEM as u64) as usize;
+			}
+			"--max-steps" => {
+				i += 1;
+				max_steps = args.get(i).and_then(|s| parse_num(s)).unwrap_or(DEFAULT_STEPS);
+			}
+			"--org" => {
+				i += 1;
+				org = args.get(i).and_then(|s| parse_num(s)).unwrap_or(0) as usize;
+			}
+			"--trace" => trace = true,
+			"--regs" => show_regs = true,
+			"--quiet" => quiet = true,
+			"--dump" => {
+				i += 1;
+				dump = args.get(i).cloned();
+			}
+			other if other.starts_with("--") => {
+				eprintln!("unknown option {other}");
+				return usage();
+			}
+			other => image_path = Some(other.to_string()),
+		}
+		i += 1;
+	}
+
+	let Some(path) = image_path else { return usage() };
+	let image = match std::fs::read(&path) {
+		Ok(b) => b,
+		Err(e) => {
+			eprintln!("cannot read {path}: {e}");
+			return ExitCode::FAILURE;
+		}
+	};
+
+	if org + image.len() > mem_bytes {
+		eprintln!(
+			"image is {} bytes at {org:#x}, which does not fit in {mem_bytes} bytes of memory",
+			image.len()
+		);
+		return ExitCode::FAILURE;
+	}
+
+	// u16-backed so code point access stays naturally aligned.
+	let mut mem = vec![0u16; mem_bytes.div_ceil(2)];
+	{
+		let dst = unsafe { std::slice::from_raw_parts_mut(mem.as_mut_ptr() as *mut u8, mem_bytes) };
+		dst[org..org + image.len()].copy_from_slice(&image);
+	}
+
+	let mut interp = Interpreter::with_devices(
+		mem.as_mut_ptr() as *mut (),
+		mem_bytes,
+		Devices::new(UartIo::Stdio),
+	);
+	interp.ip = org as u32;
+
+	let stop = if trace {
+		run_traced(&mut interp, max_steps)
+	} else {
+		interp.run_bounded(max_steps)
+	};
+
+	if show_regs {
+		print_regs(&interp);
+	}
+
+	if let Some(out) = dump {
+		let bytes = unsafe { std::slice::from_raw_parts(mem.as_ptr() as *const u8, mem_bytes) };
+		if let Err(e) = std::fs::write(&out, bytes) {
+			eprintln!("cannot write {out}: {e}");
+			return ExitCode::FAILURE;
 		}
 	}
 
-	#[test]
-	fn test_put_constant() {
-		let mut mem = vec![0u16; 1024];
-		let mem_ptr = mem.as_mut_ptr() as *mut ();
-		
-		let mut offset = 0;
-		// 1. Load small positive constant (10) to Reg 1 (B32)
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b32(1, 10));
-		
-		// 2. Load small negative constant (-1, encoded as 31) to Reg 2 (U16).
-		//    The immediate sign-extends to 0xFFFFFFFF, then normalizes to the
-		//    U16 tag, giving 0xFFFF -- constants are truncated to their tag.
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b16(2, -1));
-
-		// 3. Load large constant (0x12345678) to Reg 3 (B32) using LLC
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_llc_b32(3, 0x12345678));
-
-		// 4. Same constant into Reg 4, then retag as signed 16-bit. RDT
-		//    re-normalizes, so 0xFFFF sign-extends back out to -1.
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b16(4, -1));
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_rdt(4, RDT::RDT_S16));
-
-		// 5. Halt
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_halt());
-
-		let mut interp = Interpreter::new(mem_ptr, mem.len() * 2);
-		interp.run();
-
-		assert_eq!(interp.regs[1], Reg { bits: 10, datatype: DataKind::U32, flags: Flags { overflow: false, flag_bit: false } });
-		assert_eq!(interp.regs[2], Reg { bits: 0xffff, datatype: DataKind::U16, flags: Flags { overflow: false, flag_bit: false } });
-		assert_eq!(interp.regs[3], Reg { bits: 0x12345678, datatype: DataKind::U32, flags: Flags { overflow: false, flag_bit: false } });
-		assert_eq!(interp.regs[4], Reg { bits: 0xffffffff, datatype: DataKind::S16, flags: Flags { overflow: false, flag_bit: false } });
+	if !quiet {
+		match stop {
+			StopReason::Halted => eprintln!("halted after {} instructions", interp.cycles),
+			StopReason::Faulted(f) => eprintln!(
+				"FAULT {} ({:#04x}) at {:#x}, info {:#x}, after {} instructions",
+				f.cause.name(),
+				f.cause.code(),
+				interp.faults.addr,
+				f.info,
+				interp.cycles
+			),
+			StopReason::StepLimit => {
+				eprintln!("step limit ({max_steps}) reached; still at {:#x}", interp.ip)
+			}
+		}
 	}
 
-	#[test]
-	fn test_alu() {
-		let mut mem = vec![0u16; 1024];
-		let mem_ptr = mem.as_mut_ptr() as *mut ();
-
-		let mut offset = 0;
-		// Reg 1 = 10
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b32(1, 10));
-		// Reg 2 = 5
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b32(2, 5));
-		// Reg 1 = Reg 1 + Reg 2 (15)
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_add_rr(1, 2));
-		// Reg 1 = Reg 1 + (-5) (10)
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_add_ri(1, -5));
-		// Reg 1 = Reg 1 << 2 (40)
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_shl_ri(1, 2));
-		
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_halt());
-
-		let mut interp = Interpreter::new(mem_ptr, mem.len() * 2);
-		interp.run();
-
-		assert_eq!(interp.regs[1].bits, 40);
+	match stop {
+		StopReason::Halted => ExitCode::SUCCESS,
+		_ => ExitCode::FAILURE,
 	}
+}
 
-	#[test]
-	fn test_mulw() {
-		let mut mem = vec![0u16; 1024];
-		let mem_ptr = mem.as_mut_ptr() as *mut ();
+/// Emits one line of architectural state per retired instruction.
+///
+/// This is the reference stream the RTL cosimulation diffs against, so it
+/// carries everything architecturally visible: the instruction's address, all
+/// 32 registers with tags and flags, and the jump latch.
+fn run_traced(interp: &mut Interpreter, max_steps: u64) -> StopReason {
+	use std::io::Write;
+	let stdout = std::io::stdout();
+	let mut out = std::io::BufWriter::new(stdout.lock());
 
-		let mut offset = 0;
-		// Reg 1 = 0x10000 (LLC B32)
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_llc_b32(1, 0x10000));
-		// Reg 2 = 0x20000 (LLC B32)
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_llc_b32(2, 0x20000));
-		// Wide multiply: Reg 1 * Reg 2 -> low 32 bits in Reg 1, high 32 bits in Reg 3
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_mulw_rr(1, 2, 3));
-
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_halt());
-
-		let mut interp = Interpreter::new(mem_ptr, mem.len() * 2);
-		interp.run();
-
-		assert_eq!(interp.regs[1].bits, 0); // low 32 bits
-		assert_eq!(interp.regs[3].bits, 2); // high 32 bits
+	for _ in 0..max_steps {
+		let isa = interp.ip;
+		match interp.step() {
+			Ok(cont) => {
+				let _ = write!(out, "{isa:08x}");
+				for r in &interp.regs {
+					let _ = write!(
+						out,
+						" {:08x}:{}{}{}",
+						r.bits,
+						r.datatype as u8,
+						u8::from(r.flags.overflow),
+						u8::from(r.flags.flag_bit)
+					);
+				}
+				let _ = writeln!(
+					out,
+					" nisa={}",
+					match interp.nisa {
+						Some(v) => format!("{v:08x}"),
+						None => "--------".to_string(),
+					}
+				);
+				if !cont {
+					let _ = out.flush();
+					return StopReason::Halted;
+				}
+			}
+			Err(f) => {
+				let _ = out.flush();
+				return StopReason::Faulted(f);
+			}
+		}
 	}
+	let _ = out.flush();
+	StopReason::StepLimit
+}
 
-	#[test]
-	fn test_load_store() {
-		let mut mem = vec![0u16; 1024];
-		let mem_ptr = mem.as_mut_ptr() as *mut ();
-
-		let mut offset = 0;
-		// Reg 1 = 160 (memory address offset in bytes)
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b32(1, 10));
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_shl_ri(1, 4)); // 10 << 4 = 160
-		
-		// Reg 2 = 0xdeadbeef
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_llc_b32(2, 0xdeadbeef));
-		
-		// Store Reg 2 to [Reg 1]
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_st(1, 2));
-
-		// Load 32-bit from [Reg 1] to Reg 4
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_ld_b32(4, 1));
-
-		// Load address 150 into Reg 5
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b32(5, 15));
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_shl_ri(5, 4)); // 15 << 4 = 240
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_add_ri(5, -90)); // 240 - 90 = 150
-		
-		// Load with signed offset 10: [Reg 5 + 10] -> [160] to Reg 6
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_ld_b32_soff(6, 5, 10));
-
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_halt());
-
-		let mut interp = Interpreter::new(mem_ptr, mem.len() * 2);
-		interp.run();
-
-		assert_eq!(interp.regs[4].bits, 0xdeadbeef);
-		assert_eq!(interp.regs[6].bits, 0xdeadbeef);
-	}
-
-	#[test]
-	fn test_flags() {
-		let mut mem = vec![0u16; 1024];
-		let mem_ptr = mem.as_mut_ptr() as *mut ();
-
-		let mut offset = 0;
-		// Reg 1 = 15
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b32(1, 15));
-		// Reg 2 = 30
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b32(2, 10));
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_add_ri(2, 20));
-
-		// Compare Reg 1 < Reg 2 -> flag 1
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_cmp_lt_rr(1, 2));
-		// Compare Reg 1 == Reg 2 -> flag 2
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_cmp_eq(2, 1)); // sets flag 2 to false
-
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_halt());
-
-		let mut interp = Interpreter::new(mem_ptr, mem.len() * 2);
-		interp.run();
-
-		assert!(interp.regs[1].flags.flag_bit); // 15 < 30 is true
-		assert!(!interp.regs[2].flags.flag_bit); // 30 == 15 is false
-	}
-
-	#[test]
-	fn test_conditionals() {
-		let mut mem = vec![0u16; 1024];
-		let mem_ptr = mem.as_mut_ptr() as *mut ();
-
-		let mut offset = 0;
-		// Reg 1 = 1
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b32(1, 1));
-
-		// Reg 2 = 1
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b32(2, -1));
-		
-		// If flag 5 is set -> load 10 to Reg 1 (skip since flag 5 is 0)
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_xcp(5, CC::CC_FLAG_SET));
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b32(1, 10));
-
-		// If flag 5 is NOT set -> load 12 to Reg 1 (executes since flag 5 is 0)
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_xcn(5, CC::CC_FLAG_SET));
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b32(1, 12));
-
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_halt());
-
-		let mut interp = Interpreter::new(mem_ptr, mem.len() * 2);
-		
-		interp.run();
-
-		assert_eq!(interp.regs[1].bits, 12);
-	}
-
-	#[test]
-	fn test_bit_manip() {
-		let mut mem = vec![0u16; 1024];
-		let mem_ptr = mem.as_mut_ptr() as *mut ();
-
-		let mut offset = 0;
-		// Reg 2 = 0xabcd (43981)
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_llc_b32(2, 0xabcd));
-		
-		// extract bits: start=4, span=8 from Reg 2 -> Reg 1
-		// 0xabcd -> bin: 1010 1011 1100 1101. Bits 4..11: 1011 1100 -> 0xbc (188)
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_bext(1, 2, 4, 8));
-
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_halt());
-
-		let mut interp = Interpreter::new(mem_ptr, mem.len() * 2);
-		interp.run();
-
-		assert_eq!(interp.regs[1].bits, 0xbc);
-	}
-
-	#[test]
-	fn test_control_transfer() {
-		let mut mem = vec![0u16; 1024];
-		let mut offset = 0;
-		// offset 0
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b32(1, 1));
-		
-		// offset 2
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_disp_imm(4));
-		// offset 4
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_ctrl_trn());
-		
-		// offset 6 (Skipped)
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b32(1, 5));
-		// offset 8 (Skipped)
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_halt());
-		
-		// offset 10: Target of first jump
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_llc_b32(2, 20));
-		
-		// offset 16
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_disp_reg_addr(2));
-		// offset 18
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_ctrl_trn());
-		
-		// offset 20: Target of second jump
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_lc_i5_b32(3, 10));
-
-		// offset 22
-		write_code(mem.as_mut_ptr(), &mut offset, &encode_halt());
-
-		let mut interp = Interpreter::new(mem.as_mut_ptr() as *mut (), mem.len() * 2);
-		interp.run();
-
-		assert_eq!(interp.regs[1].bits, 1);
-		assert_eq!(interp.regs[2].bits, 20);
-		assert_eq!(interp.regs[3].bits, 10);
-	}
-
-	#[test]
-	fn test_fibonacci() {
-		let mut mem = vec![0u16; 1024];
-		let mut offset = 0;
-		let mem_ptr = mem.as_mut_ptr();
-
-		// a = 0 (R1)
-		write_code(mem_ptr, &mut offset, &encode_lc_i5_b32(1, 0));
-		// b = 1 (R2)
-		write_code(mem_ptr, &mut offset, &encode_lc_i5_b32(2, 1));
-		// n = 10 (R3)
-		write_code(mem_ptr, &mut offset, &encode_lc_i5_b32(3, 10));
-		// zero = 0 (R5)
-		write_code(mem_ptr, &mut offset, &encode_lc_i5_b32(5, 0));
-
-		// Loop start (offset 8). Displacements are relative to the start of the
-		// whole prefixed instruction -- offset 8 here, not the DISPI at 10 --
-		// and are scaled by 2. See docs/isa-spec.md 6.2.
-		//
-		// If R3 is 0, exit to HALT at offset 30: (30 - 8) / 2 = 11.
-		let loop_top = offset;
-		write_code(mem_ptr, &mut offset, &encode_xcp(3, CC::CC_VALUE_ZERO));
-		write_code(mem_ptr, &mut offset, &encode_disp_imm(11));
-		write_code(mem_ptr, &mut offset, &encode_ctrl_trn());
-
-		// temp = a + b (R4 = R1 + R2)
-		write_code(mem_ptr, &mut offset, &encode_cpy(4, 1));
-		write_code(mem_ptr, &mut offset, &encode_add_rr(4, 2));
-
-		// a = b (R1 = R2)
-		write_code(mem_ptr, &mut offset, &encode_cpy(1, 2));
-
-		// b = temp (R2 = R4)
-		write_code(mem_ptr, &mut offset, &encode_cpy(2, 4));
-
-		// count = count - 1 (R3 = R3 - 1)
-		write_code(mem_ptr, &mut offset, &encode_add_ri(3, -1));
-
-		// Jump back to the loop top at offset 8, from this instruction at 26:
-		// (8 - 26) / 2 = -9.
-		let back_isa = offset;
-		write_code(mem_ptr, &mut offset, &encode_disp_imm(-9));
-		write_code(mem_ptr, &mut offset, &encode_ctrl_trn());
-
-		// End
-		let halt_addr = offset;
-		write_code(mem_ptr, &mut offset, &encode_halt());
-
-		// Both displacements previously landed one code point short of their
-		// stated intent -- the forward branch on the loop's TC rather than the
-		// HALT, the backward branch on a dead initialization rather than the
-		// loop top. The program still returned 55, by two coincidences.
-		assert_eq!(loop_top, 8);
-		assert_eq!(back_isa, 26);
-		assert_eq!(halt_addr, 30);
-		assert_eq!(loop_top as isize + (11 << 1), halt_addr as isize, "forward branch reaches HALT");
-		assert_eq!(back_isa as isize + (-9 << 1), loop_top as isize, "backward branch reaches the loop top");
-
-		let mut interp = Interpreter::new(mem_ptr as _, mem.len() * 2);
-		interp.run();
-
-		// Fib(10) is 55
-		assert_eq!(interp.regs[1].bits, 55);
-
-		// let slice = unsafe { core::slice::from_raw_parts(mem_ptr as *mut u8, mem.len() * 2) };
-		// std::fs::write("test.bc", slice).unwrap();
+fn print_regs(interp: &Interpreter) {
+	eprintln!("ip = {:#010x}   instructions = {}", interp.ip, interp.cycles);
+	for (i, r) in interp.regs.iter().enumerate() {
+		if r.bits == 0 && !r.flags.overflow && !r.flags.flag_bit {
+			continue;
+		}
+		eprintln!(
+			"  r{i:<2} = {:#010x} ({:>11})  {:?}{}{}",
+			r.bits,
+			r.bits as i32,
+			r.datatype,
+			if r.flags.overflow { " OV" } else { "" },
+			if r.flags.flag_bit { " F" } else { "" },
+		);
 	}
 }

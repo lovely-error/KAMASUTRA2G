@@ -76,15 +76,6 @@ impl Interpreter {
 		end <= self.mem_bytes as u64
 	}
 
-	/// Fetches one code point. Instruction addresses are always halfword
-	/// aligned, so only the range needs checking here.
-	fn fetch_cp(&self, addr: u32) -> Result<u16, Fault> {
-		if !self.in_range(addr, 2) {
-			return Err(Fault::new(FaultCause::AddrOutOfRange, addr));
-		}
-		Ok(unsafe { self.mem_ptr.byte_add(addr as usize).cast::<u16>().read() })
-	}
-
 	fn read_mem(&self, addr: u32, width: u32) -> Result<u32, Fault> {
 		if addr % width != 0 {
 			return Err(Fault::new(FaultCause::MisalignedLoad, addr));

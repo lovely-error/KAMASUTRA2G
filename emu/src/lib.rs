@@ -9,7 +9,9 @@
 //! `kdis`) share one definition of the instruction set, and so the Questa
 //! testbench can link against it through DPI-C.
 
+pub mod asm;
 pub mod devices;
+pub mod dis;
 pub mod fault;
 pub mod insns;
 pub mod interp;

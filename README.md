@@ -39,6 +39,26 @@ matches it.
 - **[docs/gowin-sv-support.md](docs/gowin-sv-support.md)** — which SystemVerilog constructs the
   Gowin toolchain actually accepts, measured rather than assumed.
 
+## Running a program
+
+```bash
+cd emu
+cargo run --bin kasm -- programs/hello.kasm -o hello.bin
+cargo run --bin emu  -- hello.bin
+```
+
+```
+Hello from KAMASUTRA2G!
+halted after 174 instructions
+```
+
+| Tool | What it does |
+|---|---|
+| `kasm` | Assembler. `--listing` disassembles what it produced; `--labels` dumps the symbol table. |
+| `kdis` | Disassembler. Built on the emulator's own decoder, so it cannot disagree with what would execute. |
+| `emu` | Runner. `--trace` emits per-instruction architectural state for cosimulation; also `--regs`, `--dump`, `--max-steps`. |
+| `gen_defs` | Regenerates `rtl/k2g_pkg.sv` and `docs/isa-opcodes.md`. |
+
 ## Building
 
 ```bash

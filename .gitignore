@@ -34,3 +34,6 @@ Thumbs.db
 
 # Gowin SV probe output (regenerate with rtl/sv-probe/run_probe.sh)
 /rtl/sv-probe/out/
+
+# Assembled program images (reproducible from programs/*.kasm)
+*.bin

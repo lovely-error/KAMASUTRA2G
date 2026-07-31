@@ -1,0 +1,79 @@
+; fib.kasm -- fib(10) = 55, printed as decimal over the UART.
+;
+; The assembly form of the canonical reference program. The original was
+; hand-encoded with both branch displacements miscalculated (the forward branch
+; landed on the loop's own TC rather than the HALT, the backward branch on a
+; dead initialization); it produced the right answer by coincidence. Computing
+; displacements from labels is the whole point of having an assembler.
+
+UART_DATA = 0x00
+
+        .org    0
+
+        puc32   r1, 0           ; a
+        puc32   r2, 1           ; b
+        puc32   r3, 10          ; n
+
+loop:
+        ; Exit when the counter reaches zero. VALUE_ZERO reads r3's value
+        ; directly, so no compare instruction is needed.
+        xcp     r3, zero: dispi print
+        tc                      ; falls through while r3 != 0 (spec 6.5)
+
+        cpy     r4, r1          ; t = a + b
+        add     r4, r2
+        cpy     r1, r2          ; a = b
+        cpy     r2, r4          ; b = t
+        add     r3, -1
+        dispi   loop
+        tc
+
+; ---------------------------------------------------------------------------
+; Print r1 as decimal. Digits are produced least-significant first into a
+; buffer, then emitted in reverse.
+; ---------------------------------------------------------------------------
+print:
+        puc32   r10, UART_DATA
+        puc32   r9, buf         ; buffer base, kept for the emit loop
+        cpy     r5, r9          ; write pointer
+        puc32   r6, 10          ; radix
+
+digits:
+        cpy     r7, r1          ; r7 will become r1 % 10
+        puc32   r8, 0           ; r8 will become r1 / 10
+divloop:
+        ; DIV is cut from v1 (spec 10), so divide by repeated subtraction.
+        lt      r7, r6
+        xcp     r7, flag: dispi divdone
+        tc
+        sub     r7, r6
+        add     r8, 1
+        dispi   divloop
+        tc
+divdone:
+        add     r7, '0'
+        ; Store width comes from the SOURCE register's tag, not the opcode
+        ; (spec 5.3). Without this retag r7 is U32 and `st` writes four bytes,
+        ; which faults on an unaligned buffer position.
+        rdt     r7, u8
+        st      [r5], r7
+        add     r5, 1
+        cpy     r1, r8
+        xcn     r1, zero: dispi digits
+        tc
+
+emit:
+        add     r5, -1
+        ld8     r7, [r5]
+        out     r10, r7
+        gt      r5, r9          ; more digits below the write pointer?
+        xcp     r5, flag: dispi emit
+        tc
+
+        puc32   r7, 10          ; newline
+        out     r10, r7
+        halt
+
+        .align  4
+buf:
+        .space  16

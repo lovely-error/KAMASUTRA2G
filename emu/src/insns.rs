@@ -600,6 +600,32 @@ pub fn encode_st_mcr(rix1: u16, rix2: u16) -> [u16;2] {
 }
 
 // ALU Operations
+/// Two-address ALU/comparison op with a register source: `dst = dst op src`.
+///
+/// Generic because every such opcode shares the 6/5/5 shape. Several -- `SUB`,
+/// `MUL`, `DIV`, `AND`, `OR`, `XOR` -- had no named encoder at all, which is
+/// how the `SUB` overflow bug went unnoticed for so long.
+pub fn encode_alu_rr(op: LB, rix1: u16, rix2: u16) -> [u16;1] {
+	assert!(reg_index_in_bounds(rix1 as usize));
+	assert!(reg_index_in_bounds(rix2 as usize));
+	[pack_6_5_5(op as _, rix1, rix2)]
+}
+
+/// Two-address ALU/comparison op with an immediate source.
+///
+/// Always emits the `XI` prefix, since without one `arg2` is a register index.
+/// The immediate is assembled as `(sext10(prefix) << 5) | arg2`, giving 15-bit
+/// signed range (spec 4).
+pub fn encode_alu_ri(op: LB, rix1: u16, imm: isize) -> [u16;2] {
+	assert!(reg_index_in_bounds(rix1 as usize));
+	assert!(imm_in_bounds(imm, 15), "immediate {imm} does not fit 15 bits signed");
+	let bits = imm as u32;
+	[
+		pack_6_10(LB::LB_XI as _, ((bits >> 5) & 0x3ff) as u16),
+		pack_6_5_5(op as _, rix1, (bits & 0x1f) as u16),
+	]
+}
+
 pub fn encode_neg(rix1: u16) -> [u16;1] {
 	[
 		pack_6_5_5(LB::LB_EP1 as _, rix1, EP1::EP1_NEG as _)

@@ -1,0 +1,32 @@
+; hello.kasm -- print a string over the UART.
+;
+; The milestone program: proof the machine can do I/O at all. I/O is not
+; memory-mapped -- `in`/`out` assemble to CSP-prefixed loads and stores into a
+; separate port space (docs/isa-spec.md 9).
+
+UART_DATA = 0x00
+
+        .org    0
+
+        puc32   r1, msg         ; read pointer
+        puc32   r2, UART_DATA   ; port number
+
+loop:
+        ld8     r3, [r1]        ; next byte, zero-extended into a U8 tag
+
+        ; Branch when the byte is NUL. VALUE_ZERO tests the register's value
+        ; directly, so no separate compare is needed.
+        xcp     r3, zero: dispi done
+        tc                      ; when r3 != 0 the DISPI was suppressed, so
+                                ; nisa is unprimed and this falls through
+
+        out     r2, r3          ; transmit
+        add     r1, 1
+        dispi   loop
+        tc
+
+done:
+        halt
+
+msg:
+        .asciz  "Hello from KAMASUTRA2G!\n"
