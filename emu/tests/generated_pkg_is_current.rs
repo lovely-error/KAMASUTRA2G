@@ -9,11 +9,11 @@
 
 use std::path::PathBuf;
 
-fn generated_path() -> PathBuf {
+fn repo_path(rel: &str) -> PathBuf {
 	PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 		.parent()
 		.expect("emu/ should have a parent directory")
-		.join(emu::sv_gen::OUTPUT_PATH)
+		.join(rel)
 }
 
 /// Line endings are normalized so a CRLF checkout does not fail spuriously.
@@ -21,9 +21,8 @@ fn norm(s: &str) -> String {
 	s.replace("\r\n", "\n")
 }
 
-#[test]
-fn checked_in_package_matches_generator() {
-	let path = generated_path();
+fn assert_current(rel: &str, expected: String) {
+	let path = repo_path(rel);
 
 	let on_disk = std::fs::read_to_string(&path).unwrap_or_else(|e| {
 		panic!(
@@ -32,8 +31,6 @@ fn checked_in_package_matches_generator() {
 			path.display()
 		)
 	});
-
-	let expected = emu::sv_gen::emit_sv();
 
 	if norm(&on_disk) != norm(&expected) {
 		// Point at the first differing line rather than dumping 229 lines.
@@ -59,6 +56,35 @@ fn checked_in_package_matches_generator() {
 			b.get(first_diff),
 		);
 	}
+}
+
+#[test]
+fn checked_in_package_matches_generator() {
+	assert_current(emu::sv_gen::OUTPUT_PATH, emu::sv_gen::emit_sv());
+}
+
+/// The opcode numbers in the docs are generated too, so `docs/isa-spec.md` can
+/// carry semantics by hand without the encodings going stale beside them.
+#[test]
+fn checked_in_opcode_tables_match_generator() {
+	assert_current(emu::sv_gen::DOC_OUTPUT_PATH, emu::sv_gen::emit_opcode_tables_md());
+}
+
+#[test]
+fn opcode_tables_list_every_assigned_encoding() {
+	let md = emu::sv_gen::emit_opcode_tables_md();
+	// Spot-check across all four enums, including the two the RTL keys off most.
+	for needle in [
+		"| 53 | `110101` | `LB_ADD` |",
+		"| 31 | `11111` | `EP1_EP2` |",
+		"| 25 | `11001` | `EP2_HALT` |",
+		"| 29 | `11101` | `CC_VALUE_ZERO` |",
+	] {
+		assert!(md.contains(needle), "opcode table missing row: {needle}");
+	}
+	// Filler encodings are summarized, never listed as rows.
+	assert!(!md.contains("_UNCLAIMED_"), "unassigned encodings should be summarized");
+	assert!(md.contains("Unassigned: 0-27."), "LB unassigned range wrong");
 }
 
 /// The generated file must actually contain the opcode map, not just a header.

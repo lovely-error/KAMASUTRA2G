@@ -21,56 +21,75 @@ fn repo_root() -> PathBuf {
 		.to_path_buf()
 }
 
+/// Compare ignoring line-ending style; .gitattributes normalizes to LF but a
+/// fresh checkout on Windows can still land CRLF on disk.
+fn differs_from_disk(path: &PathBuf, generated: &str) -> bool {
+	match std::fs::read_to_string(path) {
+		Ok(cur) => cur.replace("\r\n", "\n") != generated.replace("\r\n", "\n"),
+		Err(_) => true,
+	}
+}
+
+fn write_out(path: &PathBuf, generated: &str) -> Result<(), String> {
+	if let Some(dir) = path.parent() {
+		std::fs::create_dir_all(dir)
+			.map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+	}
+	std::fs::write(path, generated)
+		.map_err(|e| format!("could not write {}: {e}", path.display()))?;
+	println!(
+		"wrote {} ({} bytes, {} lines)",
+		path.display(),
+		generated.len(),
+		generated.lines().count()
+	);
+	Ok(())
+}
+
 fn main() -> ExitCode {
 	let check_only = std::env::args().any(|a| a == "--check");
+	let root = repo_root();
 
-	let generated = emu::sv_gen::emit_sv();
-	let out_path = repo_root().join(emu::sv_gen::OUTPUT_PATH);
-
-	let existing = std::fs::read_to_string(&out_path).ok();
-	// Compare ignoring line-ending style; .gitattributes normalizes to LF but a
-	// fresh checkout on Windows can still land CRLF on disk.
-	let differs = match &existing {
-		Some(cur) => cur.replace("\r\n", "\n") != generated.replace("\r\n", "\n"),
-		None => true,
-	};
+	let outputs = [
+		(root.join(emu::sv_gen::OUTPUT_PATH), emu::sv_gen::emit_sv()),
+		(root.join(emu::sv_gen::DOC_OUTPUT_PATH), emu::sv_gen::emit_opcode_tables_md()),
+	];
 
 	if check_only {
-		return if differs {
-			eprintln!("{} is out of date.", out_path.display());
-			eprintln!("Regenerate with: cd emu && cargo run --bin gen_defs");
-			ExitCode::FAILURE
-		} else {
-			println!("{} is up to date.", out_path.display());
-			ExitCode::SUCCESS
-		};
+		let stale: Vec<_> = outputs
+			.iter()
+			.filter(|(p, g)| differs_from_disk(p, g))
+			.map(|(p, _)| p.display().to_string())
+			.collect();
+
+		if stale.is_empty() {
+			for (p, _) in &outputs {
+				println!("{} is up to date.", p.display());
+			}
+			return ExitCode::SUCCESS;
+		}
+		for p in &stale {
+			eprintln!("{p} is out of date.");
+		}
+		eprintln!("Regenerate with: cd emu && cargo run --bin gen_defs");
+		return ExitCode::FAILURE;
 	}
 
-	if !differs {
-		println!("{} already up to date.", out_path.display());
-		return ExitCode::SUCCESS;
-	}
-
-	if let Some(dir) = out_path.parent() {
-		if let Err(e) = std::fs::create_dir_all(dir) {
-			eprintln!("could not create {}: {e}", dir.display());
+	let mut wrote_any = false;
+	for (path, generated) in &outputs {
+		if !differs_from_disk(path, generated) {
+			println!("{} already up to date.", path.display());
+			continue;
+		}
+		if let Err(e) = write_out(path, generated) {
+			eprintln!("{e}");
 			return ExitCode::FAILURE;
 		}
+		wrote_any = true;
 	}
 
-	match std::fs::write(&out_path, &generated) {
-		Ok(()) => {
-			println!(
-				"wrote {} ({} bytes, {} lines)",
-				out_path.display(),
-				generated.len(),
-				generated.lines().count()
-			);
-			ExitCode::SUCCESS
-		}
-		Err(e) => {
-			eprintln!("could not write {}: {e}", out_path.display());
-			ExitCode::FAILURE
-		}
+	if !wrote_any {
+		println!("nothing to do.");
 	}
+	ExitCode::SUCCESS
 }

@@ -21,6 +21,12 @@ use crate::insns::{
 /// Path the generated package is written to, relative to the repository root.
 pub const OUTPUT_PATH: &str = "rtl/k2g_pkg.sv";
 
+/// Path the generated opcode tables are written to, relative to the repo root.
+///
+/// `docs/isa-spec.md` carries the semantics by hand, but the *numbers* are
+/// generated so documentation cannot drift from the implementation either.
+pub const DOC_OUTPUT_PATH: &str = "docs/isa-opcodes.md";
+
 /// A duplicate discriminant in an opcode enum.
 #[derive(Debug, PartialEq, Eq)]
 pub struct DuplicateValue {
@@ -163,6 +169,83 @@ pub fn emit_sv() -> String {
 	let _ = writeln!(out, "endpackage");
 	let _ = writeln!(out);
 	let _ = writeln!(out, "`endif  // K2G_PKG_SV");
+
+	out
+}
+
+/// True for the filler variants that occupy an otherwise unassigned encoding.
+fn is_unclaimed(name: &str) -> bool {
+	name.contains("_UNCLAIMED_")
+}
+
+/// Collapses a sorted list of values into `"3, 5-9, 12"` form.
+fn summarize_ranges(mut values: Vec<u16>) -> String {
+	if values.is_empty() {
+		return "none".to_string();
+	}
+	values.sort_unstable();
+	let mut parts: Vec<String> = Vec::new();
+	let mut start = values[0];
+	let mut prev = values[0];
+	for &v in &values[1..] {
+		if v == prev + 1 {
+			prev = v;
+			continue;
+		}
+		parts.push(if start == prev { format!("{start}") } else { format!("{start}-{prev}") });
+		start = v;
+		prev = v;
+	}
+	parts.push(if start == prev { format!("{start}") } else { format!("{start}-{prev}") });
+	parts.join(", ")
+}
+
+/// Renders the opcode tables as Markdown, for inclusion in the ISA docs.
+pub fn emit_opcode_tables_md() -> String {
+	let mut out = String::new();
+
+	let _ = writeln!(out, "<!-- GENERATED FILE -- DO NOT EDIT BY HAND. -->");
+	let _ = writeln!(out, "<!-- Produced by emu/src/sv_gen.rs from emu/src/insns.rs. -->");
+	let _ = writeln!(out, "<!-- Regenerate: cd emu && cargo run --bin gen_defs -->");
+	let _ = writeln!(out);
+	let _ = writeln!(out, "# K2G opcode tables");
+	let _ = writeln!(out);
+	let _ = writeln!(out, "Generated from the opcode enums in `emu/src/insns.rs`, which are the");
+	let _ = writeln!(out, "normative definition. Semantics live in [isa-spec.md](isa-spec.md); this");
+	let _ = writeln!(out, "file carries only the encodings, so the numbers cannot drift from the");
+	let _ = writeln!(out, "implementation. The same enums generate `rtl/k2g_pkg.sv`.");
+	let _ = writeln!(out);
+
+	for (sv_type, rust_name, bits, variants) in all_enums() {
+		let claimed: Vec<_> = variants.iter().filter(|(n, _)| !is_unclaimed(n)).collect();
+		let unclaimed: Vec<u16> =
+			variants.iter().filter(|(n, _)| is_unclaimed(n)).map(|&(_, v)| v).collect();
+
+		let _ = writeln!(out, "## `{rust_name}` — {bits} bits");
+		let _ = writeln!(out);
+		let _ = writeln!(
+			out,
+			"Rust `insns::{rust_name}`, SystemVerilog `k2g_pkg::{sv_type}`. \
+			 {} of {} encodings assigned.",
+			claimed.len(),
+			variants.len()
+		);
+		let _ = writeln!(out);
+		let _ = writeln!(out, "| Dec | Bin | Name |");
+		let _ = writeln!(out, "|----:|-----|------|");
+		for &&(name, value) in &claimed {
+			let _ = writeln!(
+				out,
+				"| {value} | `{value:0width$b}` | `{name}` |",
+				value = value,
+				width = bits as usize,
+				name = name
+			);
+		}
+		let _ = writeln!(out);
+		let _ = writeln!(out, "Unassigned: {}.", summarize_ranges(unclaimed));
+		let _ = writeln!(out);
+	}
 
 	out
 }
