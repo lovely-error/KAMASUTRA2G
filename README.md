@@ -58,6 +58,28 @@ halted after 174 instructions
 | `kdis` | Disassembler. Built on the emulator's own decoder, so it cannot disagree with what would execute. |
 | `emu` | Runner. `--trace` emits per-instruction architectural state for cosimulation; also `--regs`, `--dump`, `--max-steps`. |
 | `gen_defs` | Regenerates `rtl/k2g_pkg.sv` and `docs/isa-opcodes.md`. |
+| `kgen` | Generates random programs for differential testing. |
+
+## Verifying
+
+```bash
+cd emu && cargo test          # emulator, assembler, spec conformance
+bash rtl/sim/run.sh           # RTL directed testbenches + program runs
+bash rtl/sim/cosim.sh         # lockstep RTL vs emulator, incl. random programs
+```
+
+The third is the one that matters most. It steps both machines one instruction
+at a time and compares **all** architectural state after each — 32 register
+values, 32 type tags, 32 flag pairs, and the jump latch, roughly 1200 bits per
+instruction. Programs come from `emu/programs/` plus `kgen`, which generates
+random straight-line programs weighted toward the combinatorial part of the
+ISA: prefixes × main opcodes × tags × condition codes.
+
+A failing seed is reproducible:
+
+```bash
+cd emu && cargo run --release --bin kgen -- --seed 7 --count 250 -o r.bin
+```
 
 ## Building
 

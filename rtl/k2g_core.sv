@@ -258,7 +258,7 @@ module k2g_core
   logic        mem_pending, mulw_pending;
   logic [4:0]  pend_dst;
   logic [2:0]  pend_tag;
-  logic [31:0] pend_hi;
+  logic [31:0] pend_lo;
   logic [1:0]  pend_addr_lo;
 
   wire logic take_uop   = uop_valid && !stall && !halted;
@@ -362,12 +362,15 @@ module k2g_core
       we_value = 1'b1;
       we_tag   = 1'b1;
     end else if (mulw_pending) begin
-      // Second cycle of a widening multiply: the high half. Writing it first
-      // and the low half last means that when both name the same register the
-      // low half wins, matching the emulator (spec 5.5).
+      // Second cycle of a widening multiply: the LOW half, written last so
+      // that when both halves name the same register the low half wins,
+      // matching the emulator (spec 5.5). The tag written back is the
+      // destination's original tag -- a widening multiply leaves the low
+      // destination's tag alone, and restoring it here also produces the
+      // right answer in the aliased case, where cycle one set it to U32.
       w_addr   = pend_dst;
-      w_value  = pend_hi;
-      w_tag    = RDT_U32;
+      w_value  = pend_lo;
+      w_tag    = pend_tag;
       we_value = 1'b1;
       we_tag   = 1'b1;
     end else if (take_uop && cond_met && !detect_valid) begin
@@ -408,10 +411,18 @@ module k2g_core
           we_tag   = 1'b1;
         end
         UOP_ARITH: begin
-          w_value  = (uop.arith_op == ARITH_MUL) ? product[31:0] : arith_result;
-          we_value = 1'b1;
-          // A widening multiply writes no overflow; plain MUL does (spec 5.5).
-          if (!uop.uto_valid) begin
+          if (uop.uto_valid && (uop.arith_op == ARITH_MUL)) begin
+            // Widening multiply, first cycle: the HIGH half into the UTO
+            // register, tagged U32. The low half follows next cycle.
+            w_addr   = uop.uto_reg;
+            w_value  = product[63:32];
+            w_tag    = RDT_U32;
+            we_value = 1'b1;
+            we_tag   = 1'b1;
+            // A widening multiply writes no overflow; plain MUL does.
+          end else begin
+            w_value     = (uop.arith_op == ARITH_MUL) ? product[31:0] : arith_result;
+            we_value    = 1'b1;
             w_overflow  = (uop.arith_op == ARITH_MUL) ? (|product[63:32])
                                                       : arith_overflow;
             we_overflow = 1'b1;
@@ -507,7 +518,7 @@ module k2g_core
       mulw_pending    <= 1'b0;
       pend_dst        <= 5'd0;
       pend_tag        <= RDT_U32;
-      pend_hi         <= 32'd0;
+      pend_lo         <= 32'd0;
       pend_addr_lo    <= 2'd0;
       sticky_ordering <= 1'b0;
     end else if (!halted_r) begin
@@ -533,8 +544,9 @@ module k2g_core
       end
       if (start_mulw) begin
         mulw_pending <= 1'b1;
-        pend_dst     <= uop.uto_reg;
-        pend_hi      <= product[63:32];
+        pend_dst     <= uop.dst;
+        pend_lo      <= product[31:0];
+        pend_tag     <= ra_tag;   // the low destination keeps its own tag
       end
 
       if (take_uop) begin

@@ -15,8 +15,8 @@
 module k2g_shift
   import k2g_types::*;
 (
-    input  logic [31:0] value,      // the register being shifted / inserted into
-    input  logic [31:0] src,        // BINS source
+    input  logic [31:0] value,      // shift operand, and the BINS destination
+    input  logic [31:0] src,        // BEXT source, and the BINS insert source
     input  logic [4:0]  amount,     // shift amount, already masked to 5 bits
     input  shift_e      shift_op,
     input  logic [4:0]  bm_start,
@@ -46,7 +46,11 @@ module k2g_shift
                               ? 32'd0
                               : ((32'd1 << bm_span) - 32'd1);
 
-  assign bext_result = (value >> bm_start) & span_mask;
+  // Extract reads the SOURCE register (arg2), not the destination. Extracting
+  // from `value` instead was an actual bug, caught by randomized lockstep
+  // cosimulation -- the unit test had encoded the same misunderstanding, so it
+  // passed against wrong RTL.
+  assign bext_result = (src >> bm_start) & span_mask;
 
   wire logic [31:0] placed_mask = span_mask << bm_start;
   wire logic [31:0] placed_src  = (src & span_mask) << bm_start;

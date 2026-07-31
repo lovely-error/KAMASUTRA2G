@@ -72,15 +72,25 @@ module k2g_regfile
 );
 
   // ---- value array -------------------------------------------------------
-  // Written in the exact shape GowinSynthesis infers SSRAM from: one
-  // synchronous write, asynchronous reads, no reset loop over the array. A
-  // reset still infers RAM but drags in extra primitives; architectural reset
-  // of the values is not needed, since a program cannot observe a register
-  // before writing it and the cosimulation harness zeroes both machines.
+  // One synchronous write and asynchronous reads is the shape GowinSynthesis
+  // infers SSRAM from.
+  //
+  // The reset costs roughly 85 LUTs and a handful of extra RAM primitives, and
+  // was initially left out for that reason. It is worth paying: without it the
+  // array powers up undefined, the emulator's zeroed registers disagree, and
+  // the cosimulation cannot compare a register until something writes it.
+  // SystemVerilog also forbids a testbench from initializing a variable owned
+  // by an always_ff block, so the alternative was a simulation-only backdoor
+  // that would leave the RTL itself non-deterministic at reset.
   logic [31:0] values [0:31];
 
+  integer v;
   always_ff @(posedge clk) begin
-    if (we_value) values[w_addr] <= w_value;
+    if (!rst_n) begin
+      for (v = 0; v < 32; v = v + 1) values[v] <= 32'd0;
+    end else if (we_value) begin
+      values[w_addr] <= w_value;
+    end
   end
 
   // ---- tag and flag array ------------------------------------------------

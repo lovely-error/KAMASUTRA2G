@@ -92,6 +92,14 @@ done
 fail=0
 for t in "${tests[@]}"; do
     out="$WORK/$t.log"
+    # tb_cosim needs an image and the DPI shared object; rtl/sim/cosim.sh
+    # drives it, including the random-seed sweep.
+    if [ "$t" = "tb_cosim" ]; then
+        printf '%-24s SKIP  (run: bash rtl/sim/cosim.sh)
+' "$t"
+        continue
+    fi
+
     if [ "$t" = "tb_core" ]; then
         for spec in "${PROGRAMS[@]}"; do
             img="${spec%%:*}"

@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+
+[lib]
+name = "emu"
+path = "src/lib.rs"
+# cdylib as well as rlib: the cosimulation testbench loads the emulator as a
+# DPI-C shared object so it can be stepped from SystemVerilog.
+crate-type = ["rlib", "cdylib"]

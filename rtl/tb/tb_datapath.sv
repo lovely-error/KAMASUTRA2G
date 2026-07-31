@@ -148,8 +148,12 @@ module tb_datapath
     check("shr of -1 is logical", shift_result == 32'h0FFF_FFFF);
 
     // ---- bit fields -----------------------------------------------------
-    value = 32'h0000_ABCD; bm_start = 5'd4; bm_span = 5'd8; #1;
-    check("bext", bext_result == 32'h0000_00BC);
+    // Extract reads `src` (the arg2 register). `value` is set to something
+    // different on purpose: reading the wrong operand is exactly the bug this
+    // test previously failed to catch.
+    src = 32'h0000_ABCD; value = 32'hDEAD_BEEF;
+    bm_start = 5'd4; bm_span = 5'd8; #1;
+    check("bext reads the source operand", bext_result == 32'h0000_00BC);
 
     value = 32'hFFFF_FFFF; src = 32'd0; bm_start = 5'd4; bm_span = 5'd4; #1;
     check("bins clears a field", bins_result == 32'hFFFF_FF0F);

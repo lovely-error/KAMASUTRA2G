@@ -11,6 +11,7 @@
 
 pub mod asm;
 pub mod devices;
+pub mod dpi;
 pub mod dis;
 pub mod fault;
 pub mod insns;
