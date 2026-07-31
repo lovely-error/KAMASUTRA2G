@@ -70,7 +70,10 @@ emit:
         xcp     r5, flag: dispi emit
         tc
 
-        puc32   r7, 10          ; newline
+        ; CRLF: a serial terminal does not return the carriage on a bare LF.
+        puc32   r7, 13          ; CR
+        out     r10, r7
+        puc32   r7, 10          ; LF
         out     r10, r7
         halt
 

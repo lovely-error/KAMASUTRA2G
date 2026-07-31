@@ -99,7 +99,7 @@ runs on a divide-by-4 at **6.75 MHz**.
 | Clock | Constraint | Actual Fmax | Logic levels |
 |---|---|---|---|
 | `clk_27m` | 27.0 MHz | 448.6 MHz | 2 |
-| `clk_sys` | 6.75 MHz | 10.8 MHz | 23 |
+| `clk_sys` | 6.75 MHz | 10.0 MHz | 28 |
 
 Zero negative slack on both.
 
@@ -111,6 +111,25 @@ for the lockstep cosimulation being green: it makes the change safe to attempt.
 
 Raising `CLK_DIV` to 2 would need an Fmax above 13.5 MHz; the current design is
 about 2 MHz short.
+
+## Terminal conventions
+
+Programs emit **CRLF**, not a bare LF. A serial terminal treats LF as "move
+down one row" and leaves the column alone, so a bare newline makes each line
+start where the previous one ended — output marches diagonally off the right
+of the screen. This is a terminal convention, not a bug in the machine: the
+same bytes look correct piped to a file or through the emulator's stdout.
+
+PuTTY can paper over it with *Terminal → Implicit CR in every LF*, but sending
+CRLF is what a serial device is expected to do.
+
+## Reset
+
+The board has no hardware debounce on the button, so one press produced a
+burst of edges and the machine ran its program once per edge. `k2g_soc`
+synchronizes the button and then requires the level to hold for 10 ms before
+believing it. That also gives a clean power-on reset, since the debounced
+signal starts asserted.
 
 ## Flow control on the UART
 

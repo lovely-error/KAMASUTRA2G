@@ -28,5 +28,8 @@ loop:
 done:
         halt
 
+; CRLF, not bare LF. A serial terminal treats LF as "down one row" and leaves
+; the column alone, so a bare newline makes each line start where the previous
+; one ended -- a staircase marching off the right of the screen.
 msg:
-        .asciz  "Hello from KAMASUTRA2G!\n"
+        .asciz  "Hello from KAMASUTRA2G!\r\n"

@@ -65,8 +65,8 @@ module k2g_rom (
       6'd48: data = 8'h32;
       6'd49: data = 8'h47;
       6'd50: data = 8'h21;
-      6'd51: data = 8'h0A;
-      6'd52: data = 8'h00;
+      6'd51: data = 8'h0D;
+      6'd52: data = 8'h0A;
       6'd53: data = 8'h00;
       default: data = 8'h00;
     endcase

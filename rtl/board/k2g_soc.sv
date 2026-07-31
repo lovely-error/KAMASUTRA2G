@@ -48,14 +48,44 @@ module k2g_soc
   // fails silently on hardware rather than loudly in the report.
   wire logic clk_sys = div[1];
 
-  // ---- reset synchronization --------------------------------------------
-  // The button is asynchronous; releasing reset out of sync with the clock is
-  // a reliable way to start in an undefined state.
+  // ---- reset: synchronize, then debounce ---------------------------------
+  // The button is asynchronous, so it is synchronized first; releasing reset
+  // out of sync with the clock is a reliable way to start in an undefined
+  // state.
+  logic rst_meta, rst_syncd;
+  always_ff @(posedge clk_sys) begin
+    rst_meta  <= rst_n;
+    rst_syncd <= rst_meta;
+  end
+
+  // There is no hardware debounce on this board, so one press of the button
+  // produces a burst of edges and the machine runs its program once per edge.
+  // The level must hold for 10 ms before it is believed.
+  localparam int DEBOUNCE = CLK_HZ / 100;
+  localparam int DB_W     = $clog2(DEBOUNCE + 1);
+
+  logic [DB_W-1:0] db_count;
+  logic            rst_stable;
+
+  always_ff @(posedge clk_sys) begin
+    if (rst_syncd == rst_stable) begin
+      db_count <= '0;
+    end else if (db_count == DB_W'(DEBOUNCE)) begin
+      rst_stable <= rst_syncd;
+      db_count   <= '0;
+    end else begin
+      db_count <= db_count + DB_W'(1);
+    end
+  end
+
+  // `rst_stable` powers up at 0, which also gives a clean power-on reset: the
+  // machine is held until the button has read released for a full debounce
+  // interval.
   logic [3:0] rst_sync;
   wire  logic sys_rst_n = rst_sync[3];
 
   always_ff @(posedge clk_sys) begin
-    rst_sync <= {rst_sync[2:0], rst_n};
+    rst_sync <= {rst_sync[2:0], rst_stable};
   end
 
   // ---- boot ROM and copier ----------------------------------------------
