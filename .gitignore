@@ -37,3 +37,6 @@ Thumbs.db
 
 # Assembled program images (reproducible from programs/*.kasm)
 *.bin
+
+# Questa simulation output
+/rtl/sim/work/

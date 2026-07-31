@@ -82,3 +82,20 @@ bash rtl/sv-probe/run_probe.sh
 
 Override the toolchain location with `GW_SH=/path/to/gw_sh.exe`. Per-probe logs and netlists land
 in `rtl/sv-probe/out/<probe>/`. Re-run after any Gowin IDE upgrade.
+
+## Questa (simulation) — verified separately
+
+`E:\Quartus\questa_fse\win64`, **Questa Altera Starter FPGA Edition-64 2025.2**.
+
+| Capability | Result |
+|---|---|
+| SystemVerilog structs, packed unions, enums | works |
+| **DPI-C, SV → Rust** | works — a `cdylib` built with the MSVC toolchain loads via `vsim -sv_lib` |
+| DPI-C array transfer | works with **fixed-size** unpacked arrays (`output int unsigned regs [4]`), which pass a pointer to the first element |
+
+Unsized open arrays (`regs []`) pass an `svOpenArrayHandle`, not a pointer, and
+silently read back as zeros against a plain `*mut u32` — declare fixed sizes.
+
+This matters because the whole Phase 4 verification strategy is lockstep
+cosimulation driving the Rust emulator through DPI, so it was proven before any
+RTL was written.
