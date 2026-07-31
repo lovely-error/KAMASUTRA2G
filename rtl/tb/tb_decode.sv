@@ -17,6 +17,7 @@ module tb_decode
   logic [15:0] cp;
   logic        cp_valid;
   logic        flush = 0;
+  logic        hold = 0;
   logic        accept;
   uop_t        uop;
   logic        uop_valid;

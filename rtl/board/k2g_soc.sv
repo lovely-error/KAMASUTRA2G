@@ -158,29 +158,15 @@ module k2g_soc
   );
 
   // ---- UART --------------------------------------------------------------
-  // The core writes a byte in a single cycle and does not wait, so a one-byte
-  // holding register absorbs it while the transmitter shifts.
-  logic       tx_pending;
-  logic [7:0] tx_hold;
-  wire  logic tx_go = tx_pending && tx_ready;
-
-  always_ff @(posedge clk_sys) begin
-    if (!sys_rst_n) begin
-      tx_pending <= 1'b0;
-      tx_hold    <= 8'd0;
-    end else if (core_tx_valid) begin
-      tx_hold    <= core_tx_data;
-      tx_pending <= 1'b1;
-    end else if (tx_go) begin
-      tx_pending <= 1'b0;
-    end
-  end
-
+  // Straight ready/valid to the transmitter. The one-byte holding register
+  // that used to sit here was the bug: the core does not wait, so each new
+  // byte overwrote the one being shifted out. The core now stalls instead,
+  // which costs nothing architecturally.
   k2g_uart_tx #(.DIVISOR(DIVISOR)) u_tx (
       .clk  (clk_sys),
       .rst_n(sys_rst_n),
-      .valid(tx_go),
-      .data (tx_hold),
+      .valid(core_tx_valid),
+      .data (core_tx_data),
       .ready(tx_ready),
       .tx   (uart_tx)
   );

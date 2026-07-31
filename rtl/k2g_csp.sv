@@ -24,6 +24,10 @@ module k2g_csp
     input  logic [31:0] wdata,
     output logic [31:0] rdata,
     output logic        bad_port,     // -> FAULT_BAD_CSP_PORT
+    // Asserted when this access cannot complete yet. The core holds the
+    // instruction rather than retiring it, so nothing architectural changes --
+    // which is why a stall is invisible to the lockstep comparison.
+    output logic        stall,
 
     // Machine state exposed through the FAULT_* and CYCLE_* ports.
     input  logic [63:0] cycle_count,
@@ -90,7 +94,14 @@ module k2g_csp
 
   wire logic do_write = req && is_write && !bad_write;
 
-  assign uart_tx_valid = do_write && (port == 32'h00);
+  // A UART write waits for the transmitter. Without this the core, which is
+  // roughly fifty times faster than the serial line, overwrites the byte being
+  // sent again and again: a 24-byte string came out as its first character
+  // followed by its last.
+  wire logic uart_write = do_write && (port == 32'h00);
+
+  assign stall         = uart_write && !uart_tx_ready;
+  assign uart_tx_valid = uart_write && uart_tx_ready;
   assign uart_tx_data  = wdata[7:0];
   assign uart_rx_take  = req && !is_write && (port == 32'h00) && uart_rx_valid;
 
@@ -115,6 +126,6 @@ module k2g_csp
 
   // Kept so the port reads back what was written, even though the divisor is
   // consumed outside this module.
-  wire logic _unused_divisor = &{1'b0, uart_divisor, uart_tx_ready};
+  wire logic _unused_divisor = &{1'b0, uart_divisor};
 
 endmodule

@@ -72,7 +72,11 @@ module k2g_core
   logic uop_valid;
   logic decode_en;
 
-  assign decode_en = cp_valid && !stall && !halted;
+  // Deliberately NOT gated by `stall`: the decoder's output is combinational,
+  // and routing the stall into it closes a loop through the CSP request. The
+  // stall freezes the accumulator via `hold` instead, and `take_uop` is what
+  // actually prevents an instruction retiring.
+  assign decode_en = cp_valid && !halted;
 
   k2g_decode u_decode (
       .clk      (clk),
@@ -80,6 +84,7 @@ module k2g_core
       .cp       (imem_data),
       .cp_valid (decode_en),
       .flush    (redirect),
+      .hold     (stall),
       .accept   (),
       .uop      (uop),
       .uop_valid(uop_valid)
@@ -220,6 +225,7 @@ module k2g_core
 
   logic [31:0] csp_rdata;
   logic        csp_bad_port;
+  logic        csp_stall;
   logic [31:0] compat_flags;
   logic        sticky_ordering;
   logic [63:0] cycle_count;
@@ -237,6 +243,7 @@ module k2g_core
       .wdata          (rb_value),
       .rdata          (csp_rdata),
       .bad_port       (csp_bad_port),
+      .stall          (csp_stall),
       .cycle_count    (cycle_count),
       .fault_cause    (fault_cause),
       .fault_addr     (fault_addr),
@@ -267,7 +274,10 @@ module k2g_core
   wire logic start_mulw = take_uop && cond_met && (uop.kind == UOP_ARITH) &&
                           (uop.arith_op == ARITH_MUL) && uop.uto_valid;
 
-  assign stall = mem_pending || mulw_pending;
+  // A CSP access that cannot complete holds the instruction instead of
+  // retiring it. Because nothing commits, the architectural state after each
+  // retired instruction is unchanged -- the cosimulation cannot see a stall.
+  assign stall = mem_pending || mulw_pending || csp_stall;
 
   assign dmem_addr  = access_addr;
   assign dmem_en    = take_uop && cond_met && (is_load || is_store) &&

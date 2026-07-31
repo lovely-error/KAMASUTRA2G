@@ -24,7 +24,7 @@ module tb_core
   logic [3:0]  dmem_we;
   logic        uart_tx_valid, uart_rx_take;
   logic [7:0]  uart_tx_data;
-  logic        uart_tx_ready = 1'b1;
+  logic        uart_tx_ready;
   logic        uart_rx_valid = 1'b0;
   logic [7:0]  uart_rx_data = 8'd0;
   logic        halted, faulted;
@@ -45,6 +45,20 @@ module tb_core
       .b_wdata(dmem_wdata),
       .b_rdata(dmem_rdata)
   );
+
+  // A REALISTIC transmitter: busy for a while after each accepted byte.
+  //
+  // Holding `ready` high forever is what let a flow-control bug reach
+  // hardware. The core is roughly fifty times faster than a 115200 baud line,
+  // so a testbench that always accepts instantly cannot see the difference
+  // between a design with backpressure and one without.
+  localparam int TX_BUSY_CYCLES = 40;
+  int tx_busy = 0;
+  always_ff @(posedge clk) begin
+    if (uart_tx_valid && uart_tx_ready) tx_busy <= TX_BUSY_CYCLES;
+    else if (tx_busy > 0)               tx_busy <= tx_busy - 1;
+  end
+  assign uart_tx_ready = (tx_busy == 0);
 
   // ---- UART capture ------------------------------------------------------
   byte unsigned uart_out [$];

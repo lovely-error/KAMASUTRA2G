@@ -31,6 +31,10 @@ module k2g_decode
     input  logic [15:0] cp,
     input  logic        cp_valid,
     input  logic        flush,
+    // Freezes the accumulator without suppressing the combinational decode.
+    // Gating `cp_valid` with the pipeline stall instead would close a loop:
+    // stall -> cp_valid -> uop_valid -> a CSP request -> stall.
+    input  logic        hold,
 
     // Number of code points consumed so far for this instruction, including
     // the one presented this cycle. Fetch uses it for `size_bytes`.
@@ -470,7 +474,7 @@ module k2g_decode
       llc_dst  <= '0;
       llc_kind <= RDT_U32;
       llc_hi   <= '0;
-    end else if (cp_valid) begin
+    end else if (cp_valid && !hold) begin
       if (emit) begin
         // Instruction complete: start the next one clean.
         pfx      <= '0;

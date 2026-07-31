@@ -99,7 +99,7 @@ runs on a divide-by-4 at **6.75 MHz**.
 | Clock | Constraint | Actual Fmax | Logic levels |
 |---|---|---|---|
 | `clk_27m` | 27.0 MHz | 448.6 MHz | 2 |
-| `clk_sys` | 6.75 MHz | 11.5 MHz | 29 |
+| `clk_sys` | 6.75 MHz | 10.8 MHz | 23 |
 
 Zero negative slack on both.
 
@@ -111,6 +111,30 @@ for the lockstep cosimulation being green: it makes the change safe to attempt.
 
 Raising `CLK_DIV` to 2 would need an Fmax above 13.5 MHz; the current design is
 about 2 MHz short.
+
+## Flow control on the UART
+
+The core is roughly fifty times faster than a 115200 baud line, so a `CSP`
+write to `UART_DATA` **stalls** until the transmitter is free.
+
+Without that the first hardware run printed `H` and a newline and nothing else:
+each new byte overwrote the one still being shifted out, so after the `H`
+completed the holding register contained the last byte of the string. The
+symptom looks like a CPU that stopped after one instruction; it is not.
+
+Stalling costs nothing architecturally. A stalled instruction has not retired,
+so nothing commits and the lockstep comparison cannot see it — the RTL and the
+emulator still agree instruction for instruction, and `hello` still takes 174.
+
+Two things made this reachable, both worth avoiding elsewhere:
+
+- The testbenches held `uart_tx_ready` high forever, so simulation could not
+  distinguish a design with backpressure from one without. They now model a
+  transmitter that is busy for 40 cycles per byte.
+- Routing the stall back into the decoder's `cp_valid` closes a combinational
+  loop: stall → decode → CSP request → stall. The decoder takes a separate
+  `hold` input that freezes its accumulator while leaving its combinational
+  output alone.
 
 ## What the toolchain would not do
 
