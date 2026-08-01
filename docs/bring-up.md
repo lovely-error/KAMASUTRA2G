@@ -1,6 +1,6 @@
 # Board bring-up — Tang Nano 9K
 
-Three bitstreams, built in order so that a failure says which layer is at
+Four bitstreams, built in order so that a failure says which layer is at
 fault rather than just "it doesn't work".
 
 **Use Git Bash, not WSL.** On a Windows box with WSL installed, `bash` from
@@ -29,8 +29,8 @@ Flash with either the Gowin Programmer GUI or:
 openFPGALoader -b tangnano9k rtl/board/out/soc/impl/pnr/project.fs
 ```
 
-**All three stages have run on hardware**, on a Tang Nano 9K over the on-board
-USB serial bridge at 115200 8N1. `fibforever` counts the 32-bit Fibonacci
+**Stages 1, 2 and 4 have run on hardware**, on a Tang Nano 9K over the on-board
+USB serial bridge at 115200 8N1. Stage 3, PSRAM, has not been flashed yet. `fibforever` counts the 32-bit Fibonacci
 sequence a term per second and wraps back to zero after 2971215073.
 
 Utilization and timing figures below come from place-and-route reports; the
