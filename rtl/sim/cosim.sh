@@ -107,7 +107,7 @@ if [ -n "$ONE_IMAGE" ]; then
 else
     # The shipped programs first: they exercise control flow, which the random
     # generator deliberately does not.
-    for prog in hello fib; do
+    for prog in hello fib hazard; do
         src="$ROOT/emu/programs/$prog.kasm"
         [ -f "$src" ] || continue
         ( cd "$ROOT/emu" && cargo run --release --quiet --bin kasm -- \

@@ -210,10 +210,26 @@ passes. **This is a real gap, not a cosmetic one**: when the front end gets fast
 shadow prefetch, or Phase 3's caches — RAW hazards appear for the first time, and any bug here
 surfaces then, far from this change.
 
-Before trusting it: add a directed hazard program to `emu/programs/` — a chain of single-code-point
-ALU ops all reading and writing the same register — run it under cosim, and restore the three
-mutants (`no-value-forwarding`, `no-tag-forwarding`, `forwarding-ignores-field-enable`) once they
-can fail.
+**Attempted and did not close it.** `emu/programs/hazard.kasm` now exists and does nothing but
+create back-to-back dependencies — chained `add r1, r1`, `rdt` immediately followed by a store that
+takes its width from that tag, a compare immediately consumed by a predicate, an overflow-setting
+add immediately predicated on. It runs clean under cosim (34 instructions, 1125 checks), and the
+three mutants **still report `MISSED`**. Deleting value forwarding outright still passes it.
+
+So the conclusion is sharper than "the programs don't happen to hazard": **X and W apparently never
+hold dependent consecutive instructions at all**, even when every instruction depends on its
+predecessor. Something in the D→X cadence serialises them, and the naive model — D emits a uop per
+code point, X fires every cycle, so consecutive single-code-point instructions overlap — is wrong
+somewhere.
+
+That is worth understanding on its own, independently of forwarding, because it is also why CPI is
+3.3–5.7 when fetch supplies one code point per cycle. **Find where the cycles go first**; the
+answer probably explains both. Then restore the three mutants (`no-value-forwarding`,
+`no-tag-forwarding`, `forwarding-ignores-field-enable`) — they are known-good tests waiting for a
+design that can fail them.
+
+Until then the forwarding logic is unproven. It is not known to be wrong; it is known to be
+untested.
 
 **2d — still to do.** Shadow prefetch on `PrepareJump` for zero-bubble branches. That is also the
 main lever on the CPI above.

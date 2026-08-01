@@ -1,0 +1,81 @@
+; hazard.kasm -- back-to-back register dependencies, to exercise forwarding.
+;
+; The pipeline writes the register file a stage after it reads it, so an
+; instruction whose operand was produced by its immediate predecessor must be
+; forwarded rather than read. Nothing else in emu/programs/ produces that
+; situation often enough to notice: measured on hello and fib, the number of
+; read-after-write hazards crossing the execute/writeback boundary was ZERO,
+; and deleting the forwarding logic outright still passed the whole
+; cosimulation.
+;
+; So this program does nothing but create them. Every instruction here is a
+; single code point whose source is the previous instruction's destination,
+; which is the one pattern that cannot be satisfied from the register file.
+;
+; It covers each forwarded FIELD separately, not just the value, because they
+; have independent write enables (k2g_regfile.sv): an arithmetic op writes only
+; `overflow`, a comparison only `flag_bit`, a copy writes everything. Forwarding
+; a whole register on any write would pass a value-only test and corrupt the
+; rest.
+;
+; The tag chain is the important one and the least obvious. A store takes its
+; width from the SOURCE register's tag (spec 5.3), so an unforwarded tag does
+; not produce a wrong value -- it silently writes the wrong number of bytes.
+
+        .org    0
+
+; ---- value: a dependency chain with no gaps ----------------------------
+; Each add reads the register the previous add just wrote.
+        puc32   r1, 1
+        add     r1, r1
+        add     r1, r1
+        add     r1, r1
+        add     r1, r1
+        add     r1, r1          ; r1 = 32
+
+; ---- value across two registers, alternating ---------------------------
+        cpy     r2, r1
+        add     r2, r1
+        cpy     r3, r2
+        add     r3, r2
+        cpy     r4, r3
+        add     r4, r3
+
+; ---- tag: RDT then an immediate store of that register -----------------
+; `rdt` rewrites the tag and renormalizes; the store that follows takes its
+; width from it. If the tag is not forwarded the store writes 4 bytes where it
+; should write 1.
+        puc32   r10, 0x100
+        puc32   r11, 0xAABBCCDD
+        rdt     r11, u8
+        st      [r10], r11      ; one byte, from r11's just-written tag
+        puc32   r12, 0x104
+        puc32   r13, 0x11223344
+        rdt     r13, u16
+        st      [r12], r13      ; two bytes, likewise
+
+; ---- flag: compare then immediately consume the flag -------------------
+; A comparison writes ONLY flag_bit. The predicated instruction after it reads
+; that bit in the very next cycle.
+        puc32   r5, 7
+        puc32   r6, 7
+        tst     r5, r6          ; sets r5.flag
+        puc32   r7, 0xDEAD      if r5.flag
+        tstn    r5, r6          ; clears r5.flag
+        puc32   r8, 0xBEEF      if !r5.flag
+
+; ---- overflow: arithmetic then immediately predicate on it -------------
+; An arithmetic op writes ONLY overflow, leaving flag_bit alone -- so this also
+; catches forwarding that ignores the per-field enables and clobbers one with
+; the other.
+        puc32   r20, 0xFFFFFFFF
+        add     r20, 1          ; wraps: sets r20.overflow
+        puc32   r21, 0x5555     if r20.overflow
+        tst     r5, r6          ; r5.flag set again, r20 untouched
+        puc32   r22, 0x6666     if r5.flag
+
+; ---- copy: writes value, tag AND both flags ----------------------------
+        cpy     r23, r20        ; takes r20's value, tag and flags
+        puc32   r24, 0x7777     if r23.overflow
+
+        halt
