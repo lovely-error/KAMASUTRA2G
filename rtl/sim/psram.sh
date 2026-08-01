@@ -22,8 +22,19 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 RTL="$(cd "$HERE/.." && pwd)"
 WORK="$HERE/work/psram"
 
-IP="$ROOT/K2606/src/psram_memory_interface_hs/psram_memory_interface_hs.vo"
-[ -f "$IP" ] || { echo "IP model not found: $IP" >&2; exit 1; }
+# A KEPT COPY, not the one in K2606/.
+#
+# The IP has a "Simulation" option that shortens its initialization timing. The
+# IP's own help says it speeds simulation up and "when running the board test
+# must cancel it and generate the IP again" -- and a netlist generated with it
+# cleared is the one that belongs in a bitstream. So the two cannot be the same
+# file, and the board-test build is the one that has to live in K2606/.
+#
+# This copy was taken from the SIMULATION=true generation before that checkbox
+# was cleared. It cannot be regenerated without setting the option again and
+# overwriting the build netlist, which is why it is tracked rather than derived.
+IP="$HERE/psram_hs_sim.vo"
+[ -f "$IP" ] || { echo "simulation model not found: $IP" >&2; exit 1; }
 
 # prim_sim.v is shipped several times over inside the IDE; any copy will do.
 PRIM="$(find "$GOWIN/IDE" -name prim_sim.v 2>/dev/null | head -1)"

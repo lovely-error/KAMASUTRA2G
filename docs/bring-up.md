@@ -110,6 +110,35 @@ otherwise guesswork. Read it before changing anything here.
 The command interval was being violated outright — commands were issued about
 two cycles apart, gated only on `cmd_rdy`, which does not enforce it.
 
+### The IP has a Simulation option, and it must be OFF for hardware
+
+`SIMULATION=true` in `psram_memory_interface_hs.ipc`, and `` `define SIM `` in
+the generated `psram_define.v`. The IP's own help page
+(`IDE/ipcore/PSRAM_HS/doc/psramhs_help.html`) says of it:
+
+> When simulate the project, click this will speed up. **When running the board
+> test must cancel it and generate the IP again.**
+
+It shortens the initialization timing. That is why calibration never completed
+on hardware, and it is consistent with everything else observed: the controller
+looked healthy in the fabric, ran both clocks, and reached the bus at ~497 µs
+before stopping — which is what a shortened init sequence against a real device
+would do.
+
+It had been set since before any of this work started and survived a
+regeneration, because it is a checkbox that stays where it was left.
+
+**Consequence for simulation.** A board-test netlist and a simulation netlist
+cannot be the same file. `rtl/sim/psram_hs_sim.vo` is a tracked copy of the
+`SIM` build, kept because it cannot be regenerated without setting the option
+again and overwriting the one the bitstream needs. `rtl/sim/psram.sh` uses that
+copy; `K2606/` holds the board-test build.
+
+**And expect it to be slower.** With `SIM` cleared the real power-on delays
+return — the protocol wants around 150 µs before the first transaction, and the
+shortened build already took ~497 µs to reach the bus. Allow a second or two
+after reset before reading anything into the LEDs.
+
 ### The memory clock is a GENERATION parameter, not an operating range
 
 "Memory Clock — Expected frequency — 50 MHz~166 MHz" appears in Table 6-1,
