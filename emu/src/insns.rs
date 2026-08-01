@@ -856,10 +856,13 @@ pub fn encode_disp_reg_addr(rix: u16) -> [u16;1] {
 	]
 }
 
-pub fn encode_disp_reg_addr_link(dst: u16, ba: u16) -> [u16;2] {
+// Link register first, matching encode_disp_reg_off_link. It used to be the
+// other way around here, which read as (dst, ba) and silently swapped the two
+// registers at the only call site.
+pub fn encode_disp_reg_addr_link(rix3: u16, rix: u16) -> [u16;2] {
 	[
-		pack_6_5_5(LB::LB_EP1 as _, ba, EP1::EP1_UTO as _),
-		pack_6_5_5(LB::LB_DISP as _, dst, EP1::EP1_DISP_ABS as _),
+		pack_6_5_5(LB::LB_EP1 as _, rix3, EP1::EP1_UTO as _),
+		pack_6_5_5(LB::LB_DISP as _, rix, EP1::EP1_DISP_ABS as _),
 	]
 }
 
