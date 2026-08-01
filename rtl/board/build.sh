@@ -39,6 +39,14 @@ fi
 case "$STAGE" in
     blink)    TOP="k2g_blink";    SRC=("$HERE/k2g_blink.sv") ;;
     loopback) TOP="k2g_loopback"; SRC=("$HERE/k2g_uart.sv" "$HERE/k2g_loopback.sv") ;;
+    psram)
+        # The in-package PSRAM on its own: PLL, controller, calibration and a
+        # readback check, reported on the LEDs. No UART and no clock crossing,
+        # so a failure here is about the memory and nothing else.
+        TOP="k2g_psram_probe"
+        SRC=("$HERE/k2g_pll.sv" "$HERE/k2g_psram_probe.sv"
+             "$ROOT/K2606/src/psram_memory_interface_hs/psram_memory_interface_hs.v")
+        ;;
     soc)
         TOP="k2g_soc"
         SRC=("$RTL/k2g_pkg.sv" "$RTL/k2g_types.svh")
@@ -47,12 +55,15 @@ case "$STAGE" in
         done
         SRC+=("$HERE/k2g_uart.sv" "$HERE/k2g_rom.sv" "$HERE/k2g_soc.sv")
         ;;
-    *) echo "unknown stage '$STAGE' (blink | loopback | soc)" >&2; exit 1 ;;
+    *) echo "unknown stage '$STAGE' (blink | loopback | psram | soc)" >&2; exit 1 ;;
 esac
 
 rm -rf "$WORK"; mkdir -p "$WORK"
 for f in "${SRC[@]}"; do cp "$f" "$WORK/"; done
 cp "$HERE/tangnano9k.cst" "$HERE/tangnano9k.sdc" "$WORK/"
+# Stage-specific timing, if any. Constraints naming nets that exist in only one
+# design must not go in the shared file: Gowin errors on a missing object.
+[ -f "$HERE/tangnano9k_$STAGE.sdc" ] && cp "$HERE/tangnano9k_$STAGE.sdc" "$WORK/"
 cp "$RTL/k2g_types.svh" "$WORK/" 2>/dev/null || true
 cp "$HERE/k2g_rom.svh" "$WORK/" 2>/dev/null || true
 # Memory init files, if the stage needs them.
@@ -69,6 +80,7 @@ cp "$HERE"/*.hex "$WORK/" 2>/dev/null || true
     done
     echo "add_file -type cst {tangnano9k.cst}"
     echo "add_file -type sdc {tangnano9k.sdc}"
+    [ -f "$WORK/tangnano9k_$STAGE.sdc" ] && echo "add_file -type sdc {tangnano9k_$STAGE.sdc}"
     echo "set_option -top_module $TOP"
     echo "set_option -verilog_std sysv2017"
     echo "set_option -include_path {.}"

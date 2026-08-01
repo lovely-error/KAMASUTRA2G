@@ -13,7 +13,8 @@ From a Git Bash prompt:
 ```bash
 bash rtl/board/build.sh blink       # 1. toolchain, pinout, clock
 bash rtl/board/build.sh loopback    # 2. UART pins and baud rate
-bash rtl/board/build.sh soc         # 3. the whole machine
+bash rtl/board/build.sh psram       # 3. PLL, PSRAM controller, calibration
+bash rtl/board/build.sh soc         # 4. the whole machine
 ```
 
 Or from PowerShell, naming Git Bash explicitly:
@@ -61,7 +62,57 @@ Connect at **115200 8N1** to the board's USB serial port and type.
 | Logic | 101 / 8640 |
 | Registers | 88 / 6480 |
 
-## Stage 3 — the full machine
+## Stage 3 — PSRAM
+
+The in-package PSRAM on its own: a PLL, the Gowin controller, its calibration,
+and a write-then-read-back check. **Not yet run on hardware.**
+
+It earns a stage because it brings three things nothing before it has — a PLL,
+a controller that must calibrate before it answers, and a clock domain that is
+not the core's. There is deliberately no UART and no clock crossing here; a
+crossing is exactly what should not be in the picture while PSRAM itself is
+unproven. Everything runs in the controller's own `clk_out` domain and the
+result is on the LEDs.
+
+| LED | Meaning (lit = 1) |
+|---|---|
+| 0 | PLL locked |
+| 1 | controller finished calibrating |
+| 2 | writes done |
+| 3 | reads done |
+| 4 | **every readback matched** |
+| 5 | heartbeat, proving `clk_out` runs |
+
+0 and 1 lit but never 2 is a controller that calibrated and then would not
+accept a command. Reaching 3 without 4 is a memory that is wired and answering
+but returning wrong data, which points at the memory clock rather than the
+logic.
+
+| | |
+|---|---|
+| Logic | 1395 / 8640 (17%) |
+| Registers | 719 / 6771 (11%) |
+| IOLOGIC | 41 / 97 |
+
+### Clocks, measured rather than assumed
+
+The IP's body is encrypted, so `clk_out` cannot be read from the sources. From
+the place-and-route report: the controller divides `memory_clk` by two.
+
+| | |
+|---|---|
+| `memory_clk` from the rPLL | 135 MHz (27 × 5) |
+| `clk_out` | **67.5 MHz**, measured |
+| Logic in that domain | 75.25 MHz actual, 11.5% margin |
+
+**135 MHz, not the 166 the IP was configured for.** At 162 the user clock is
+81 MHz and this design placed at 81.1 then 82.2 MHz against it — one and a half
+percent, which is not a margin. There is nothing to defend by running fast: a
+13.5 MHz core wants about 0.4 Gbit/s and 67.5 MHz × 64 bits is 4.3. **If
+`init_calib` never rises on hardware, the memory clock is the first thing to
+suspect** — 162 MHz is `FBDIV_SEL=5, ODIV_SEL=4` in `k2g_pll.sv`.
+
+## Stage 4 — the full machine
 
 ```
 boot ROM -> copier -> 8 KB unified memory -> K2G core -> UART
