@@ -47,6 +47,12 @@ module k2g_core
 
     output logic [31:0] gpio_out,
 
+    // Instruction retirement. See the note further down: this is what the
+    // lockstep cosimulation compares against, rather than reaching into the
+    // core for whatever signals happen to mean "done" today.
+    output logic        retire_valid,
+    output retire_t     retire,
+
     // Machine status, for the LEDs and the halt-time dump.
     output logic        halted,
     output logic        faulted,
@@ -498,6 +504,68 @@ module k2g_core
         end
         default: ;
       endcase
+    end
+  end
+
+  // ---- retirement --------------------------------------------------------
+  // THE CONTRACT: `retire_valid` is high in the cycle AFTER every
+  // architectural write belonging to an instruction has committed. Sample the
+  // register file while it is high and you are looking at exactly the state
+  // the emulator has after being stepped once.
+  //
+  // This exists so the testbench does not have to know how the core is built.
+  // It used to reach in for `take_uop`, `mem_pending` and `mulw_pending` and
+  // open-code the wait for a second cycle, which pins it to a two-stage
+  // machine -- and that testbench is the only thing that makes rebuilding the
+  // machine safe. The contract is worded to survive a pipeline: "after the
+  // last write commits" stays meaningful however many stages there are.
+  //
+  // A load and a widening multiply commit their last write on their second
+  // cycle; everything else commits on its first. The three terms below are
+  // mutually exclusive, because both pending flags assert `stall` and
+  // `take_uop` requires `!stall`.
+  wire logic retire_now = (take_uop && !start_load && !start_mulw) ||
+                          mem_pending || mulw_pending;
+
+  // Captured at `take_uop`, not at retirement. `isa` is valid only in the
+  // cycle the instruction is taken: during a second cycle the front end has
+  // already presented the next code point, so `pc_d`, `imem_data` and
+  // therefore `uop.size_bytes` have all moved on. Recomputing `isa` at
+  // retirement names the wrong instruction -- exactly the class of confusion
+  // this port exists to remove.
+  retire_t taken;
+
+  always_comb begin
+    taken          = '0;
+    taken.isa      = isa;
+    taken.kind     = uop.kind;
+    taken.dst      = uop.dst;
+    taken.src      = uop.src;
+    taken.imm      = uop.imm;
+    taken.cond_met = cond_met;
+
+    // Only ever sampled under `take_uop`, which `detect_valid` already
+    // implies.
+    if (detect_valid)                            taken.cause = detected;
+    else if (cond_met && (uop.kind == UOP_HALT)) taken.cause = FAULT_HALT_INSN;
+    else                                         taken.cause = FAULT_NONE;
+  end
+
+  retire_t pend_retire;
+
+  // Deliberately NOT inside the `!halted_r` guard below: a faulting
+  // instruction retires on the very edge that halts the machine, so the pulse
+  // has to be produced then -- and cleared on the next edge, which a halted
+  // core would otherwise never reach.
+  always_ff @(posedge clk) begin
+    if (!rst_n) begin
+      retire_valid <= 1'b0;
+      retire       <= '0;
+      pend_retire  <= '0;
+    end else begin
+      if (take_uop) pend_retire <= taken;
+      retire_valid <= retire_now;
+      retire       <= take_uop ? taken : pend_retire;
     end
   end
 

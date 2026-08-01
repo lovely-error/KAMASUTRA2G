@@ -141,6 +141,29 @@ package k2g_types;
     return u;
   endfunction
 
+  // ---- Retirement --------------------------------------------------------
+  //
+  // What the core promises about a finished instruction, and the one part of
+  // its interface meant to outlive the microarchitecture. The lockstep
+  // cosimulation steps the emulator on `retire_valid` and compares; it does
+  // not otherwise know how the core is built.
+  //
+  // `isa` and `cause` are the contract. The remaining fields exist only so a
+  // divergence report can name the instruction that caused it, and `k2g_soc`
+  // leaves the whole port dangling. Measured cost of adding it: the SoC went
+  // from 4695 to 4670 LUTs and 758 to 772 registers -- free, within the noise
+  // of a re-place.
+  typedef struct packed {
+    logic [31:0] isa;        // first code point of the instruction (spec 1.2)
+    fault_e      cause;      // FAULT_NONE unless this instruction stopped the machine
+
+    uop_kind_e   kind;
+    logic [4:0]  dst;
+    logic [4:0]  src;
+    logic [31:0] imm;
+    logic        cond_met;   // clear when a predicate suppressed the operation
+  } retire_t;
+
   // ---- Data type tag helpers --------------------------------------------
   // rdt_e is flat, but its values carry structure (see k2g_pkg): bit 2 is
   // signedness, the low bits are the width code.

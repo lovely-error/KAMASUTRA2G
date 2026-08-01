@@ -31,6 +31,8 @@ module tb_core
   logic [4:0]  fault_cause_o;
   logic [31:0] fault_addr_o, fault_info_o;
   logic [63:0] cycle_count_o;
+  logic        retire_valid;
+  retire_t     retire;
 
   k2g_core #(.MEM_BYTES(MEM_BYTES)) dut (.*);
 

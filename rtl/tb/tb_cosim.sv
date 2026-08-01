@@ -9,6 +9,18 @@
 // The point is not only breadth but localization: a divergence is reported at
 // the instruction that caused it, with both machines' state, rather than
 // whenever the program's output eventually looks wrong.
+//
+// SYNCHRONIZATION IS BY CONTRACT, NOT BY INTERNALS. The core raises
+// `retire_valid` in the cycle after every architectural write of an
+// instruction has committed, and `retire` names that instruction. This
+// testbench used to reach in for `take_uop`, `mem_pending` and `mulw_pending`
+// and open-code the wait for a load's second cycle, which pinned it to a
+// two-stage machine -- the one shape the core is about to stop having.
+//
+// The register arrays are still read hierarchically (`dut.u_rf.*`), and that
+// is deliberate: they *are* the architectural state, and `k2g_regfile` stays a
+// module across the rewrite. The jump latch is read the same way for the same
+// reason.
 
 `include "k2g_types.svh"
 
@@ -55,6 +67,8 @@ module tb_cosim
   logic [4:0]  fault_cause_o;
   logic [31:0] fault_addr_o, fault_info_o;
   logic [63:0] cycle_count_o;
+  logic        retire_valid;
+  retire_t     retire;
 
   k2g_core #(.MEM_BYTES(MEM_BYTES)) dut (.*);
 
@@ -98,17 +112,14 @@ module tb_cosim
   // instruction budget and pass if the two machines agreed the whole way.
   logic  forever_ok = 1'b0;
 
-  // Latched at retirement. `pc_d` has already moved on by the time the
-  // comparison runs, so reporting it alone points at the wrong instruction.
-  logic [31:0] last_isa;
-  uop_kind_e   last_kind;
-  logic [4:0]  last_dst, last_src;
-  logic [31:0] last_imm;
-  logic        last_cond_met;
-
   // Takes 4-state operands deliberately: `int unsigned` is 2-state and would
   // coerce an X to 0, which once made a divergence report show both sides as
   // 00000000 while the comparison had failed on undefined bits.
+  //
+  // The instruction context comes from `retire`, which the core latched when
+  // the instruction was taken. Recomputing it here from the fetch state would
+  // name the wrong instruction: by the time a load retires, the front end has
+  // moved on.
   function automatic void dump_divergence(input string what, input int idx,
                                           input logic [31:0] got,
                                           input logic [31:0] want);
@@ -117,9 +128,9 @@ module tb_cosim
     $display("    RTL      = %08x", got);
     $display("    emulator = %08x", want);
     $display("  instruction at %08x: %s dst=r%0d src=r%0d imm=%08x%s",
-             last_isa, last_kind.name(), last_dst, last_src, last_imm,
-             last_cond_met ? "" : " [predicate false]");
-    $display("  RTL next pc=%08x  emulator pc=%08x", dut.pc_d, k2g_dpi_get_pc());
+             retire.isa, retire.kind.name(), retire.dst, retire.src, retire.imm,
+             retire.cond_met ? "" : " [predicate false]");
+    $display("  emulator pc=%08x", k2g_dpi_get_pc());
   endfunction
 
   // Compares everything architecturally visible. Returns 1 on a mismatch.
@@ -209,29 +220,17 @@ module tb_cosim
     rst_n = 1;
 
     while (!halted && retired < max_insns) begin
-      // Sample mid-cycle, where combinational decode has settled and no
-      // non-blocking update is in flight. Reading `mem_pending` immediately
-      // after a posedge instead sees its pre-edge value, which made the
-      // comparison run a cycle early and report a load's destination as stale
-      // -- a testbench bug that looked exactly like an RTL one.
+      // Sample mid-cycle, away from the clock edge, so the retirement flops
+      // have settled and no non-blocking update is in flight.
+      //
+      // No second cycle is waited out here any more. `retire_valid` already
+      // means every architectural write of that instruction has committed, so
+      // the register file is comparable right now. The old version reproduced
+      // the core's own multi-cycle sequencing in the testbench, and getting it
+      // subtly wrong looked exactly like an RTL bug.
       @(negedge clk);
-      if (dut.take_uop) begin
+      if (retire_valid) begin
         retired++;
-        last_isa      = dut.isa;
-        last_kind     = dut.uop.kind;
-        last_dst      = dut.uop.dst;
-        last_src      = dut.uop.src;
-        last_imm      = dut.uop.imm;
-        last_cond_met = dut.cond_met;
-
-        // Let the instruction commit, then wait out any second cycle: a
-        // load's writeback, or a widening multiply's low half.
-        @(posedge clk);
-        #1;
-        while (dut.mem_pending || dut.mulw_pending) begin
-          @(posedge clk);
-          #1;
-        end
 
         emu_status = k2g_dpi_step();
 
@@ -253,10 +252,14 @@ module tb_cosim
                      retired);
             errors++;
           end else begin
+            // `retire.cause` rather than `fault_cause_o`: it says this
+            // *instruction* stopped the machine and why, which is what the
+            // emulator's step just reported. The sticky fault register only
+            // says the machine is stopped.
             checks++;
-            if ({27'd0, fault_cause_o} !== k2g_dpi_get_fault_cause()) begin
-              $display("TB_FAIL: stop cause differs: RTL=%0d emulator=%0d",
-                       fault_cause_o, k2g_dpi_get_fault_cause());
+            if ({27'd0, retire.cause} !== k2g_dpi_get_fault_cause()) begin
+              $display("TB_FAIL: stop cause differs: RTL=%s(%0d) emulator=%0d",
+                       retire.cause.name(), retire.cause, k2g_dpi_get_fault_cause());
               errors++;
             end
           end

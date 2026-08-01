@@ -147,7 +147,7 @@ symptom looks like a CPU that stopped after one instruction; it is not.
 
 Stalling costs nothing architecturally. A stalled instruction has not retired,
 so nothing commits and the lockstep comparison cannot see it — the RTL and the
-emulator still agree instruction for instruction, and `hello` still takes 174.
+emulator still agree instruction for instruction, and `hello` still takes 181.
 
 Two things made this reachable, both worth avoiding elsewhere:
 

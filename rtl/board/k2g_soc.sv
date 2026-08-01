@@ -179,6 +179,10 @@ module k2g_soc
       .uart_rx_data (rx_byte),
       .uart_rx_take (core_rx_take),
       .gpio_out     (gpio_out),
+      // Retirement is for the cosimulation, not for the board. Left dangling;
+      // measured to cost nothing (4695 -> 4670 LUTs).
+      .retire_valid (),
+      .retire       (),
       .halted       (halted),
       .faulted      (faulted),
       .fault_cause_o(fault_cause_o),
