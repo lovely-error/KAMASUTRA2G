@@ -105,7 +105,8 @@ runs on a divided clock. It is now a divide-by-**2** at **13.5 MHz**.
 | v1, single-cycle execute | 6.75 MHz | 10.0 MHz | 28 |
 | after Phase 2b, decode split out | **13.5 MHz** | **16.3 MHz** | **13** |
 
-Zero negative slack. About 21% margin.
+Zero negative slack, about 21% margin, and **observed running on hardware** at
+13.5 MHz after a rebuild and reflash.
 
 v1's 28-level path was the whole single-cycle execute chain — fetch → decode →
 register read → ALU → writeback, all combinational within one cycle. Giving

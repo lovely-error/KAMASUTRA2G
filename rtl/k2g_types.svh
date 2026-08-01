@@ -174,6 +174,15 @@ package k2g_types;
     logic [31:0] isa;        // first code point of the instruction (spec 1.2)
     fault_e      cause;      // FAULT_NONE unless this instruction stopped the machine
 
+    // The jump latch as of this instruction, not as of now. It is
+    // architectural state (spec 1.2) that no instruction can read back, so the
+    // cosimulation is the only thing that checks it -- and once execute runs
+    // ahead of retirement, reading the live latch reports a value belonging to
+    // an instruction two further on. Carrying it here keeps the packet a
+    // complete description of the machine after this instruction.
+    logic [31:0] nisa;
+    logic        nisa_valid;
+
     uop_kind_e   kind;
     logic [4:0]  dst;
     logic [4:0]  src;

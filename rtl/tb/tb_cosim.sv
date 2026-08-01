@@ -149,6 +149,13 @@ module tb_cosim
   // instruction budget and pass if the two machines agreed the whole way.
   logic  forever_ok = 1'b0;
 
+  // Cycles seen with no retirement. A pipelined core can legitimately go
+  // quiet for a long time on a slow bus, so this only catches a genuine
+  // deadlock -- the loop no longer has `halted` to tell it when to stop.
+  int    stuck = 0;
+  localparam int STUCK_LIMIT = 100000;
+  logic  stopped;
+
   // Takes 4-state operands deliberately: `int unsigned` is 2-state and would
   // coerce an X to 0, which once made a divergence report show both sides as
   // 00000000 while the comparison had failed on undefined bits.
@@ -198,14 +205,19 @@ module tb_cosim
 
     // The jump latch is architectural even though no instruction reads it
     // directly: a mismatch here means a branch is about to go wrong.
+    //
+    // Taken from the retirement packet, not from the live latch. Execute runs
+    // ahead of retirement, so `dut.nisa` at this moment belongs to an
+    // instruction two further on -- which showed up as a phantom divergence
+    // the moment writeback got its own stage.
     checks++;
-    if (dut.nisa_valid !== (k2g_dpi_get_nisa_valid() != 0)) begin
-      dump_divergence("nisa_valid ", 0, {31'd0, dut.nisa_valid},
+    if (retire.nisa_valid !== (k2g_dpi_get_nisa_valid() != 0)) begin
+      dump_divergence("nisa_valid ", 0, {31'd0, retire.nisa_valid},
                       k2g_dpi_get_nisa_valid());
       return 1'b1;
     end
-    if (dut.nisa_valid && (dut.nisa !== k2g_dpi_get_nisa())) begin
-      dump_divergence("nisa ", 0, dut.nisa, k2g_dpi_get_nisa());
+    if (retire.nisa_valid && (retire.nisa !== k2g_dpi_get_nisa())) begin
+      dump_divergence("nisa ", 0, retire.nisa, k2g_dpi_get_nisa());
       return 1'b1;
     end
     return 1'b0;
@@ -258,7 +270,18 @@ module tb_cosim
     repeat (4) @(posedge clk);
     rst_n = 1;
 
-    while (!halted && retired < max_insns) begin
+    // Driven by the retirement contract alone, never by `halted`.
+    //
+    // `halted` rises when the stopping instruction executes, but its
+    // retirement follows once every write it owns has committed -- two cycles
+    // later now that writeback has its own stage, and further still as more
+    // stages appear. A loop that exits on `halted` drops the last instruction
+    // on the floor and reports "RTL stopped, emulator did not", which reads
+    // exactly like a core bug and is not one.
+    //
+    // `retire.cause` says whether the instruction that just retired stopped
+    // the machine, so nothing here has to know how deep the pipeline is.
+    while (retired < max_insns && stuck < STUCK_LIMIT) begin
       // Sample mid-cycle, away from the clock edge, so the retirement flops
       // have settled and no non-blocking update is in flight.
       //
@@ -268,7 +291,12 @@ module tb_cosim
       // the core's own multi-cycle sequencing in the testbench, and getting it
       // subtly wrong looked exactly like an RTL bug.
       @(negedge clk);
-      if (retire_valid) begin
+      if (!retire_valid) begin
+        stuck++;
+        continue;
+      end
+      begin
+        stuck = 0;
         retired++;
 
         emu_status = k2g_dpi_step();
@@ -279,14 +307,17 @@ module tb_cosim
           break;
         end
 
-        // Both machines must agree about stopping, and why.
-        if (halted || emu_status != 0) begin
+        // Both machines must agree about stopping, and why. Asked of the
+        // retired instruction rather than of the machine, so the answer does
+        // not depend on how many cycles `halted` leads retirement by.
+        stopped = (retire.cause != FAULT_NONE);
+        if (stopped || emu_status != 0) begin
           checks++;
-          if (halted && (emu_status == 0)) begin
+          if (stopped && (emu_status == 0)) begin
             $display("TB_FAIL: RTL stopped after %0d instructions, emulator did not",
                      retired);
             errors++;
-          end else if (!halted && (emu_status != 0)) begin
+          end else if (!stopped && (emu_status != 0)) begin
             $display("TB_FAIL: emulator stopped after %0d instructions, RTL did not",
                      retired);
             errors++;

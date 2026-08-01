@@ -258,11 +258,57 @@ module k2g_core
   logic        we_value, we_tag, we_overflow, we_flag;
   logic        w_overflow, w_flag;
 
+  // What X computed this cycle; it becomes the W packet at the next edge.
+  logic [4:0]  nw_addr;
+  logic [31:0] nw_value;
+  logic [2:0]  nw_tag;
+  logic        nw_overflow, nw_flag;
+  logic        nwe_value, nwe_tag, nwe_overflow, nwe_flag;
+  logic        w_active;    // an instruction occupies W (even if it writes nothing)
+
   k2g_regfile u_rf (.*);
 
+  // The read addresses stay raw register outputs. That is load-bearing beyond
+  // tidiness: GowinSynthesis retimes these flops into the value array's BSRAM
+  // address ports (see docs/v2-plan.md), and it can only do that while nothing
+  // combinational sits between the register and the read. Forwarding therefore
+  // muxes read DATA, never addresses.
   assign ra_addr = uop.dst;
   assign rb_addr = uop.src;
   assign rc_addr = uop.cond_reg;
+
+  // ---- forwarding W -> X -------------------------------------------------
+  // The register file reads before it writes, so an instruction in X cannot
+  // see the write its immediate predecessor is committing out of W this very
+  // cycle. There is exactly one source to forward from -- W is the only place
+  // a write is in flight -- which keeps this a mux rather than a priority
+  // network.
+  //
+  // PER FIELD, NOT PER REGISTER. A comparison writes only `flag_bit`, an
+  // arithmetic op writes only `overflow`, and a copy writes everything
+  // (k2g_regfile.sv). Forwarding a whole register on any write would overwrite
+  // the three fields the instruction in W is not touching with whatever its
+  // packet happens to carry. So each field is forwarded on its own enable.
+  //
+  // The tag matters most and is the least obvious: a store takes its width
+  // from the SOURCE register's tag (spec 5.3), so an unforwarded tag does not
+  // corrupt a value, it silently writes the wrong number of bytes.
+  wire logic hit_a = we_value | we_tag | we_overflow | we_flag;   // W is writing
+  wire logic ma    = hit_a && (w_addr == ra_addr);
+  wire logic mb    = hit_a && (w_addr == rb_addr);
+  wire logic mc    = hit_a && (w_addr == rc_addr);
+
+  wire logic [31:0] xa_value = (ma && we_value)    ? w_value    : ra_value;
+  wire logic [31:0] xb_value = (mb && we_value)    ? w_value    : rb_value;
+  wire logic [31:0] xc_value = (mc && we_value)    ? w_value    : rc_value;
+  wire logic [2:0]  xa_tag   = (ma && we_tag)      ? w_tag      : ra_tag;
+  wire logic [2:0]  xb_tag   = (mb && we_tag)      ? w_tag      : rb_tag;
+  wire logic        xa_ovf   = (ma && we_overflow) ? w_overflow : ra_overflow;
+  wire logic        xb_ovf   = (mb && we_overflow) ? w_overflow : rb_overflow;
+  wire logic        xc_ovf   = (mc && we_overflow) ? w_overflow : rc_overflow;
+  wire logic        xa_flag  = (ma && we_flag)     ? w_flag     : ra_flag;
+  wire logic        xb_flag  = (mb && we_flag)     ? w_flag     : rb_flag;
+  wire logic        xc_flag  = (mc && we_flag)     ? w_flag     : rc_flag;
 
   // ---- predication -------------------------------------------------------
   // Zero and negative are computed from the register value on demand; there is
@@ -270,11 +316,11 @@ module k2g_core
   logic cond_raw, cond_met;
   always_comb begin
     unique case (uop.cond)
-      CCK_OVERFLOW: cond_raw = rc_overflow;
-      CCK_FLAG:     cond_raw = rc_flag;
-      CCK_ZERO:     cond_raw = (rc_value == 32'd0);
-      CCK_NEGATIVE: cond_raw = rc_value[31];
-      CCK_POSITIVE: cond_raw = (rc_value != 32'd0) && !rc_value[31];
+      CCK_OVERFLOW: cond_raw = xc_ovf;
+      CCK_FLAG:     cond_raw = xc_flag;
+      CCK_ZERO:     cond_raw = (xc_value == 32'd0);
+      CCK_NEGATIVE: cond_raw = xc_value[31];
+      CCK_POSITIVE: cond_raw = (xc_value != 32'd0) && !xc_value[31];
       default:      cond_raw = 1'b1;
     endcase
     cond_met = (uop.cond == CCK_NONE) ? 1'b1 : (cond_raw ^ uop.cond_invert);
@@ -288,10 +334,10 @@ module k2g_core
 
   // An immediate carries no tag of its own, so it takes the left operand's
   // interpretation (spec 5.9).
-  assign alu_a     = ra_value;
-  assign alu_b     = uop.use_imm ? uop.imm : rb_value;
-  assign alu_a_tag = ra_tag;
-  assign alu_b_tag = uop.use_imm ? ra_tag : rb_tag;
+  assign alu_a     = xa_value;
+  assign alu_b     = uop.use_imm ? uop.imm : xb_value;
+  assign alu_a_tag = xa_tag;
+  assign alu_b_tag = uop.use_imm ? xa_tag : xb_tag;
 
   k2g_alu u_alu (
       .a             (alu_a),
@@ -312,9 +358,9 @@ module k2g_core
   logic [31:0] shift_result, bext_result, bins_result;
 
   k2g_shift u_shift (
-      .value       (ra_value),
-      .src         (rb_value),
-      .amount      (uop.use_imm ? uop.imm[4:0] : rb_value[4:0]),
+      .value       (xa_value),
+      .src         (xb_value),
+      .amount      (uop.use_imm ? uop.imm[4:0] : xb_value[4:0]),
       .shift_op    (uop.shift_op),
       .bm_start    (uop.bm_start),
       .bm_span     (uop.bm_span),
@@ -325,18 +371,18 @@ module k2g_core
 
   // Widening multiply. Full 64-bit product; the high half goes to the UTO
   // register on a second cycle so the value array keeps one write port.
-  wire logic [63:0] product = ra_value * alu_b;
+  wire logic [63:0] product = xa_value * alu_b;
 
   // ---- memory access -----------------------------------------------------
   wire logic        is_load     = (uop.kind == UOP_LOAD);
   wire logic        is_store    = (uop.kind == UOP_STORE);
-  wire logic [31:0] load_addr   = rb_value + uop.imm;
-  wire logic [31:0] store_addr  = ra_value + uop.imm;
+  wire logic [31:0] load_addr   = xb_value + uop.imm;
+  wire logic [31:0] store_addr  = xa_value + uop.imm;
   wire logic [31:0] access_addr = is_load ? load_addr : store_addr;
 
   // Store width comes from the SOURCE register's tag, not the opcode
   // (spec 5.3).
-  wire logic [2:0] access_tag   = is_load ? uop.datakind : rb_tag;
+  wire logic [2:0] access_tag   = is_load ? uop.datakind : xb_tag;
   wire logic [2:0] access_width = rdt_width_bytes(access_tag);
 
   logic [3:0] store_we;
@@ -353,9 +399,9 @@ module k2g_core
   logic [31:0] store_data;
   always_comb begin
     unique case (access_width)
-      3'd1:    store_data = {4{rb_value[7:0]}};
-      3'd2:    store_data = {2{rb_value[15:0]}};
-      default: store_data = rb_value;
+      3'd1:    store_data = {4{xb_value[7:0]}};
+      3'd2:    store_data = {2{xb_value[15:0]}};
+      default: store_data = xb_value;
     endcase
   end
 
@@ -411,8 +457,8 @@ module k2g_core
       .is_write       (is_csp_store),
       // CSP load takes the port from arg2, CSP store from arg1 -- opposite
       // operand positions (spec 9).
-      .port           (is_csp_store ? ra_value : rb_value),
-      .wdata          (rb_value),
+      .port           (is_csp_store ? xa_value : xb_value),
+      .wdata          (xb_value),
       .rdata          (csp_rdata),
       .bad_port       (csp_bad_port),
       .stall          (csp_stall),
@@ -509,7 +555,7 @@ module k2g_core
       end else if (csp_bad_port) begin
         detected     = FAULT_BAD_CSP_PORT;
         detect_valid = 1'b1;
-        detect_info  = is_csp_store ? ra_value : rb_value;
+        detect_info  = is_csp_store ? xa_value : xb_value;
       end else if ((uop.kind == UOP_PERFORM_JUMP) && nisa_valid && nisa[0]) begin
         detected     = FAULT_MISALIGNED_FETCH;
         detect_valid = 1'b1;
@@ -521,8 +567,8 @@ module k2g_core
   logic [31:0] jump_target;
   always_comb begin
     unique case (uop.jump_kind)
-      JT_REL_REG: jump_target = isa + ra_value;   // NOT shifted (spec 6.2)
-      JT_ABS_REG: jump_target = ra_value;
+      JT_REL_REG: jump_target = isa + xa_value;   // NOT shifted (spec 6.2)
+      JT_ABS_REG: jump_target = xa_value;
       default:    jump_target = isa + uop.imm;
     endcase
   end
@@ -548,25 +594,25 @@ module k2g_core
   wire logic [31:0] load_value   = rdt_normalize(load_shifted, pend_tag);
 
   always_comb begin
-    we_value    = 1'b0;
-    we_tag      = 1'b0;
-    we_overflow = 1'b0;
-    we_flag     = 1'b0;
-    w_addr      = uop.dst;
-    w_value     = 32'd0;
-    w_tag       = uop.datakind;
-    w_overflow  = 1'b0;
-    w_flag      = 1'b0;
+    nwe_value    = 1'b0;
+    nwe_tag      = 1'b0;
+    nwe_overflow = 1'b0;
+    nwe_flag     = 1'b0;
+    nw_addr      = uop.dst;
+    nw_value     = 32'd0;
+    nw_tag       = uop.datakind;
+    nw_overflow  = 1'b0;
+    nw_flag      = 1'b0;
     wb_value    = 32'd0;
     wb_tag      = RDT_U32;
 
     if (load_done) begin
       // The cycle the bus answers a load.
-      w_addr   = pend_dst;
-      w_value  = load_value;
-      w_tag    = pend_tag;
-      we_value = 1'b1;
-      we_tag   = 1'b1;
+      nw_addr   = pend_dst;
+      nw_value  = load_value;
+      nw_tag    = pend_tag;
+      nwe_value = 1'b1;
+      nwe_tag   = 1'b1;
     end else if (mulw_pending) begin
       // Second cycle of a widening multiply: the LOW half, written last so
       // that when both halves name the same register the low half wins,
@@ -574,122 +620,122 @@ module k2g_core
       // destination's original tag -- a widening multiply leaves the low
       // destination's tag alone, and restoring it here also produces the
       // right answer in the aliased case, where cycle one set it to U32.
-      w_addr   = pend_dst;
-      w_value  = pend_lo;
-      w_tag    = pend_tag;
-      we_value = 1'b1;
-      we_tag   = 1'b1;
+      nw_addr   = pend_dst;
+      nw_value  = pend_lo;
+      nw_tag    = pend_tag;
+      nwe_value = 1'b1;
+      nwe_tag   = 1'b1;
     end else if (take_uop && cond_met && !detect_valid) begin
       unique case (uop.kind)
         UOP_PUT_IMM: begin
           // Normalized to the tag, so a register's bits always match what its
           // tag claims (spec 5.1, 1.1.1).
-          w_value     = rdt_normalize(uop.imm, uop.datakind);
-          w_tag       = uop.datakind;
-          we_value    = 1'b1;
-          we_tag      = 1'b1;
-          we_overflow = 1'b1;
-          we_flag     = 1'b1;   // put-constant clears both flags
+          nw_value     = rdt_normalize(uop.imm, uop.datakind);
+          nw_tag       = uop.datakind;
+          nwe_value    = 1'b1;
+          nwe_tag      = 1'b1;
+          nwe_overflow = 1'b1;
+          nwe_flag     = 1'b1;   // put-constant clears both flags
         end
         UOP_SET_TAG: begin
           // RDT re-normalizes, which is what makes LD8 + RDT S8 a
           // sign-extending byte load (spec 5.10).
-          w_value  = rdt_normalize(ra_value, uop.datakind);
-          w_tag    = uop.datakind;
-          we_value = 1'b1;
-          we_tag   = 1'b1;
+          nw_value  = rdt_normalize(xa_value, uop.datakind);
+          nw_tag    = uop.datakind;
+          nwe_value = 1'b1;
+          nwe_tag   = 1'b1;
         end
         UOP_COPY: begin
           // A full move: value, tag and both flags (spec 5.2).
-          w_value     = rb_value;
-          w_tag       = rb_tag;
-          w_overflow  = rb_overflow;
-          w_flag      = rb_flag;
-          we_value    = 1'b1;
-          we_tag      = 1'b1;
-          we_overflow = 1'b1;
-          we_flag     = 1'b1;
+          nw_value     = xb_value;
+          nw_tag       = xb_tag;
+          nw_overflow  = xb_ovf;
+          nw_flag      = xb_flag;
+          nwe_value    = 1'b1;
+          nwe_tag      = 1'b1;
+          nwe_overflow = 1'b1;
+          nwe_flag     = 1'b1;
         end
         UOP_CSP_LOAD: begin
-          w_value  = rdt_normalize(csp_rdata, uop.datakind);
-          w_tag    = uop.datakind;
-          we_value = 1'b1;
-          we_tag   = 1'b1;
+          nw_value  = rdt_normalize(csp_rdata, uop.datakind);
+          nw_tag    = uop.datakind;
+          nwe_value = 1'b1;
+          nwe_tag   = 1'b1;
         end
         UOP_ARITH: begin
           if (uop.uto_valid && (uop.arith_op == ARITH_MUL)) begin
             // Widening multiply, first cycle: the HIGH half into the UTO
             // register, tagged U32. The low half follows next cycle.
-            w_addr   = uop.uto_reg;
-            w_value  = product[63:32];
-            w_tag    = RDT_U32;
-            we_value = 1'b1;
-            we_tag   = 1'b1;
+            nw_addr   = uop.uto_reg;
+            nw_value  = product[63:32];
+            nw_tag    = RDT_U32;
+            nwe_value = 1'b1;
+            nwe_tag   = 1'b1;
             // A widening multiply writes no overflow; plain MUL does.
           end else begin
-            w_value     = (uop.arith_op == ARITH_MUL) ? product[31:0] : arith_result;
-            we_value    = 1'b1;
-            w_overflow  = (uop.arith_op == ARITH_MUL) ? (|product[63:32])
+            nw_value     = (uop.arith_op == ARITH_MUL) ? product[31:0] : arith_result;
+            nwe_value    = 1'b1;
+            nw_overflow  = (uop.arith_op == ARITH_MUL) ? (|product[63:32])
                                                       : arith_overflow;
-            we_overflow = 1'b1;
+            nwe_overflow = 1'b1;
           end
         end
         UOP_LOGIC: begin
           if (uop.on_flags) begin
             unique case (uop.logic_op)
-              LOGIC_AND: w_flag = ra_flag & rb_flag;
-              LOGIC_OR:  w_flag = ra_flag | rb_flag;
-              default:   w_flag = ra_flag ^ rb_flag;
+              LOGIC_AND: nw_flag = xa_flag & xb_flag;
+              LOGIC_OR:  nw_flag = xa_flag | xb_flag;
+              default:   nw_flag = xa_flag ^ xb_flag;
             endcase
-            we_flag = 1'b1;
+            nwe_flag = 1'b1;
           end else begin
-            w_value  = logic_result;
-            we_value = 1'b1;
+            nw_value  = logic_result;
+            nwe_value = 1'b1;
           end
         end
         UOP_SHIFT: begin
-          w_value  = rdt_normalize(shift_result, ra_tag);
-          we_value = 1'b1;
+          nw_value  = rdt_normalize(shift_result, xa_tag);
+          nwe_value = 1'b1;
         end
         UOP_BEXT: begin
           // Extract writes the whole register; insert writes only the value
           // (spec 5.8).
-          w_value     = bext_result;
-          w_tag       = RDT_U32;
-          w_overflow  = 1'b0;
-          w_flag      = 1'b0;
-          we_value    = 1'b1;
-          we_tag      = 1'b1;
-          we_overflow = 1'b1;
-          we_flag     = 1'b1;
+          nw_value     = bext_result;
+          nw_tag       = RDT_U32;
+          nw_overflow  = 1'b0;
+          nw_flag      = 1'b0;
+          nwe_value    = 1'b1;
+          nwe_tag      = 1'b1;
+          nwe_overflow = 1'b1;
+          nwe_flag     = 1'b1;
         end
         UOP_BINS: begin
-          w_value  = bins_result;
-          we_value = 1'b1;
+          nw_value  = bins_result;
+          nwe_value = 1'b1;
         end
         UOP_CMP: begin
           // Comparisons write only flag_bit of the left operand (spec 5.9).
-          w_flag  = cmp_result;
-          we_flag = 1'b1;
+          nw_flag  = cmp_result;
+          nwe_flag = 1'b1;
         end
         UOP_UNARY: begin
           if (uop.on_flags) begin
-            w_flag  = ~ra_flag;
-            we_flag = 1'b1;
+            nw_flag  = ~xa_flag;
+            nwe_flag = 1'b1;
           end else begin
-            w_value  = rdt_normalize(unary_result, ra_tag);
-            we_value = 1'b1;
+            nw_value  = rdt_normalize(unary_result, xa_tag);
+            nwe_value = 1'b1;
           end
         end
         UOP_PREP_JUMP: begin
           // The link register points at the code point after the DISP, which
           // in the usual idiom is the TC itself (spec 6.3).
           if (uop.uto_valid) begin
-            w_addr   = uop.uto_reg;
-            w_value  = isa + uop.size_bytes;
-            w_tag    = RDT_U32;
-            we_value = 1'b1;
-            we_tag   = 1'b1;
+            nw_addr   = uop.uto_reg;
+            nw_value  = isa + uop.size_bytes;
+            nw_tag    = RDT_U32;
+            nwe_value = 1'b1;
+            nwe_tag   = 1'b1;
           end
         end
         default: ;
@@ -734,6 +780,14 @@ module k2g_core
     taken.imm      = uop.imm;
     taken.cond_met = cond_met;
 
+    // The latch AFTER this instruction, mirroring the sequential update below.
+    // Priming and performing are different uop kinds, so they cannot both
+    // happen at once.
+    taken.nisa       = do_prep_jump ? jump_target : nisa;
+    taken.nisa_valid = do_prep_jump ? 1'b1
+                     : do_perform   ? 1'b0
+                                    : nisa_valid;
+
     // Only ever sampled under `take_uop`, which `detect_valid` already
     // implies.
     if (detect_valid)                            taken.cause = detected;
@@ -742,20 +796,56 @@ module k2g_core
   end
 
   retire_t pend_retire;
+  retire_t w_retire;      // the instruction sitting in W
 
   // Deliberately NOT inside the `!halted_r` guard below: a faulting
   // instruction retires on the very edge that halts the machine, so the pulse
   // has to be produced then -- and cleared on the next edge, which a halted
   // core would otherwise never reach.
+  // ---- W: commit ---------------------------------------------------------
+  // X computes a writeback packet; W is what actually drives the register
+  // file's write port. That is the split -- X's cycle now ends at a register
+  // instead of running on into the array.
+  //
+  // Not gated by `halted_r`. A faulting instruction stops the machine on the
+  // same edge that loads W with its predecessor's packet, and that predecessor
+  // committed before the fault was known: precision means the FAULTING
+  // instruction writes nothing, not that the one before it loses its result.
+  always_ff @(posedge clk) begin
+    if (!rst_n) begin
+      we_value    <= 1'b0;
+      we_tag      <= 1'b0;
+      we_overflow <= 1'b0;
+      we_flag     <= 1'b0;
+      w_active    <= 1'b0;
+      w_retire    <= '0;
+    end else begin
+      we_value    <= nwe_value;
+      we_tag      <= nwe_tag;
+      we_overflow <= nwe_overflow;
+      we_flag     <= nwe_flag;
+      w_addr      <= nw_addr;
+      w_value     <= nw_value;
+      w_tag       <= nw_tag;
+      w_overflow  <= nw_overflow;
+      w_flag      <= nw_flag;
+
+      // Retirement follows the commit by one more cycle now: the packet is in
+      // W during one cycle and lands in the register file at the edge out of
+      // it. Sampling any earlier would compare against state not yet written.
+      w_active    <= retire_now;
+      w_retire    <= take_uop ? taken : pend_retire;
+      if (take_uop) pend_retire <= taken;
+    end
+  end
+
   always_ff @(posedge clk) begin
     if (!rst_n) begin
       retire_valid <= 1'b0;
       retire       <= '0;
-      pend_retire  <= '0;
     end else begin
-      if (take_uop) pend_retire <= taken;
-      retire_valid <= retire_now;
-      retire       <= take_uop ? taken : pend_retire;
+      retire_valid <= w_active;
+      retire       <= w_retire;
     end
   end
 
@@ -803,7 +893,7 @@ module k2g_core
         mulw_pending <= 1'b1;
         pend_dst     <= uop.dst;
         pend_lo      <= product[31:0];
-        pend_tag     <= ra_tag;   // the low destination keeps its own tag
+        pend_tag     <= xa_tag;   // the low destination keeps its own tag
       end
 
       if (take_uop) begin

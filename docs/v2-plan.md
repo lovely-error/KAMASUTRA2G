@@ -179,7 +179,44 @@ against four, with every register still matching. Gating it on `take_uop` closes
 `csp_req → csp_stall → stall → take_uop` loop, so it is gated on every *other* reason X might not
 fire. Locked in as the `csp-side-effect-while-held` mutant. The fix cost about 1.1 MHz.
 
-**2c, 2d — still to do.** Split X from M/W, which forces forwarding; then shadow prefetch.
+**2c done — writeback is its own stage, with per-field forwarding.** X computes a writeback packet;
+W drives the register file's write port. Forwarding is per field (value, tag, overflow, flag),
+because a comparison writes only `flag_bit` and an arithmetic op only `overflow` — forwarding a
+whole register on any write would clobber the three fields the instruction in W is not touching.
+The tag matters most and is least obvious: a store takes its width from the source register's tag,
+so an unforwarded tag writes the wrong *number of bytes* rather than the wrong value.
+
+Two things had to move into the retirement contract, both because X now runs ahead of retirement:
+
+- `nisa` and `nisa_valid` are in `retire_t`. The jump latch is architectural state no instruction
+  can read back, so cosim is the only thing checking it — and reading the live latch reports a
+  value belonging to an instruction two further on. That showed up immediately as a phantom
+  divergence.
+- `tb_cosim` no longer synchronises on `halted` at all. `halted` rises when the stopping
+  instruction executes; its retirement follows once every write commits. A loop exiting on `halted`
+  drops the last instruction and reports "RTL stopped, emulator did not", which reads exactly like
+  a core bug and is not one.
+
+### ⚠ The forwarding is correct but unexercised
+
+Measured, with a probe counting hazards across the X→W boundary: **`raw_across_XW = 0`** on both
+`hello` and `fib`, and removing value forwarding entirely still passes the whole cosimulation.
+Back-to-back retirement does happen (48 times in `hello`), but CPI is 3.3–5.7 — the front end
+cannot feed X fast enough for consecutive *dependent* instructions to overlap, so the mux never
+fires.
+
+Three mutants written for it all reported `MISSED` and were removed rather than left as vacuous
+passes. **This is a real gap, not a cosmetic one**: when the front end gets faster — Phase 2d's
+shadow prefetch, or Phase 3's caches — RAW hazards appear for the first time, and any bug here
+surfaces then, far from this change.
+
+Before trusting it: add a directed hazard program to `emu/programs/` — a chain of single-code-point
+ALU ops all reading and writing the same register — run it under cosim, and restore the three
+mutants (`no-value-forwarding`, `no-tag-forwarding`, `forwarding-ignores-field-enable`) once they
+can fail.
+
+**2d — still to do.** Shadow prefetch on `PrepareJump` for zero-bubble branches. That is also the
+main lever on the CPI above.
 
 | Stage | Work |
 |---|---|
