@@ -346,7 +346,7 @@ The ISA-specific traps, each of which is a real one:
 ## Phase 3 — PSRAM
 
 - **`rtl/k2g_psram.sv`** — wraps `PSRAM_Memory_Interface_HS_Top` from
-  `K2606/src/psram_memory_interface_hs/`: 21-bit address, 64-bit user data, 32-byte bursts,
+  `K2606/src/psram_memory_interface_hs/`: 21-bit address, 64-bit user data, 64-byte bursts,
   `memory_clk` 135 MHz, initial latency 6. `K2606/src/psram_ctrl.sv` is **empty** — there is no
   existing controller to build on. Nothing may issue a command before `init_calib`.
 - **`rtl/k2g_cdc_fifo.sv`** — core domain ↔ PSRAM `clk_out`. Do **not** port `docs/attic/pipe.sv`'s
@@ -372,20 +372,22 @@ cosim green.
 
 **Goal:** caches over the real 8 MB backing store, built once. (Was: before PSRAM's timing enters.
 
-- **`rtl/k2g_icache.sv`**, **`rtl/k2g_dcache.sv`** — direct-mapped, 8 KB each, 32-byte lines
-  matching the PSRAM IP's configured 32-byte burst so a refill is exactly one burst. D$ is
+- **`rtl/k2g_icache.sv`**, **`rtl/k2g_dcache.sv`** — direct-mapped, 8 KB each, 64-byte lines
+  matching the PSRAM IP's configured 64-byte burst so a refill is exactly one burst. D$ is
   write-back with dirty bits and a victim writeback path. Confirm the IP's user-side beat count and
   `clk_out` from the IP sources rather than assuming them.
 - **Data arrays reuse `k2g_mem.sv`'s shape** — four byte lanes, one DPB each, instantiated not
   inferred. That structure exists because Gowin BSRAM has no per-byte write enables, and it is
   exactly what a cache data array needs. 8 blocks of the 22 free.
 - **A refill takes a bus lock.** `k2g_membus` carries one beat per request and has no burst length,
-  so the requests of a 32-byte line fill are not marked as one thing. The refilling master
+  so the sixteen requests of a 64-byte line fill are not marked as one thing. The refilling master
   holds the bus across the whole run. A line half-filled from two addresses is undetectable
   afterwards — it answers wrong forever, from a tag that says it is valid. The full reasoning is
   in `rtl/k2g_membus.sv`; the lock is the first thing to write, before either cache.
 - Tags in flip-flops: 23-bit space, 7-bit index, 6-bit offset → 10 tag bits + valid (+ dirty) ×
-  128 lines. Registers are at 12% utilization.
+  128 lines. 64-byte rather than 32-byte lines halve that: 128 entries instead of 256, which is
+  about 3000 flip-flops saved across the two caches against a 6480 budget. That, not bandwidth, is
+  why the IP's burst is 64 — both burst sizes have ample bandwidth for a 13.5 MHz core.
 
 **Four currently-no-op prefixes become real hardware.** Spec §3.2 warns that ignoring a
 reinterpreting prefix does not degrade gracefully:
