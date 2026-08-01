@@ -29,8 +29,7 @@ matches it.
 | `rtl/sv-probe/` | Measures which SystemVerilog constructs GowinSynthesis accepts. |
 | `docs/` | Specification and findings. |
 | `K2606/` | Gowin IDE project (currently PSRAM IP only). |
-| `docs/attic/` | Superseded code kept for design information. Not built. |
-| `decoder.sv`, `ifas.sv`, `padb.sv`, `pipe.sv`, `forwards.sv` | Superseded HDL. See caveat below. |
+| `docs/attic/` | Superseded code kept for design information. Not built. See caveat below. |
 
 ## Documents
 
@@ -52,7 +51,7 @@ cargo run --bin emu  -- hello.bin
 
 ```
 Hello from KAMASUTRA2G!
-halted after 174 instructions
+halted after 181 instructions
 ```
 
 | Tool | What it does |
@@ -131,8 +130,9 @@ vacuously:
 
 ## A caveat about the superseded HDL
 
-`decoder.sv` and its companions describe a **different instruction set** than the emulator and do
-not compile. They are kept for the one idea worth carrying forward — a prefix-carry chain across a
-fixed-width fetch window — and for `pipe.sv`'s handshake style. They are **not** a specification,
-and their compile failures say nothing about Gowin's SystemVerilog support (see
-`docs/gowin-sv-support.md`).
+An earlier attempt at this machine — `decoder.sv`, `ifas.sv`, `padb.sv`, `forwards.sv` — described
+a **different instruction set** than the emulator and did not compile. It has been deleted; `v1`
+and earlier tags still have it. Only `docs/attic/pipe.sv` is kept, for its handshake style, which
+v2 builds on (see [docs/v2-plan.md](docs/v2-plan.md)). It is **not** a specification, it is not
+built, and its compile failures say nothing about Gowin's SystemVerilog support — see
+`docs/gowin-sv-support.md`, which measures that directly.
