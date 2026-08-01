@@ -223,15 +223,17 @@ module k2g_psram_probe (
   // low half, so the mask opens bytes 0..3 on beat 3 alone.
   //
   // If LED4 is dark, this is the number to change.
-  localparam int          WR_LEAD  = 1;      // beats start this many cycles after cmd_en
-  localparam int          TGT_BEAT = 3;       // word 6 = beat 3, low half
+  // SEARCHED, not assumed. One flash per candidate is a poor way to find a
+  // number, so the probe tries every lead from 0 to 15 and reports which one
+  // worked -- or that none did, which would mean the fault is not the phase at
+  // all but something about how per-beat masking works.
+  localparam logic [4:0] TGT_BEAT = 5'd3;     // word 6 = beat 3, low half
 
-  // Elaborated to a constant rather than cast at use. Counting the beat from
-  // cmd_en and shifting the comparison avoids preloading the counter with a
-  // negative value, which needs a width cast -- and width casts in expressions
-  // are one of the constructs that kill gw_sh silently.
-  localparam logic [4:0] MASK_AT = TGT_BEAT + WR_LEAD;
-  localparam logic [4:0] READ_AT = TGT_BEAT;
+  logic [4:0] lead;                           // candidate under test
+  logic       found;
+
+  wire logic [4:0] mask_at = lead + TGT_BEAT;
+  wire logic [4:0] read_at = TGT_BEAT;
 
   logic [4:0] wbeat;                         // 0..16, counts burst beats
   logic       wmask_on;
@@ -256,7 +258,7 @@ module k2g_psram_probe (
 
   // Open only for the target beat during the masked write; wide open otherwise.
   always_comb begin
-    if (wmask_on) data_mask = (wbeat == MASK_AT) ? 8'hF0 : 8'hFF;
+    if (wmask_on) data_mask = (wbeat == mask_at) ? 8'hF0 : 8'hFF;
     else          data_mask = 8'h00;
   end
 
@@ -276,6 +278,8 @@ module k2g_psram_probe (
       geo_128  <= 1'b0;
       wbeat    <= 5'd0;
       wmask_on <= 1'b0;
+      lead     <= 5'd0;
+      found    <= 1'b0;
       cap        <= 64'd0;
       cap_exp    <= 64'd0;
       cap_valid  <= 1'b0;
@@ -375,11 +379,24 @@ module k2g_psram_probe (
           phase  <= G_RDW;
         end
         G_RDW: if (rd_data_valid) begin
-          if (wbeat == READ_AT) begin
-            geo_128  <= (rd_data[31:0]  == GEO_A[31:0]) &&
-                        (rd_data[63:32] == GEO_B[63:32]);
-            geo_done <= 1'b1;
-            phase    <= P_DONE;
+          if (wbeat == read_at) begin
+            if ((rd_data[31:0]  == GEO_A[31:0]) &&
+                (rd_data[63:32] == GEO_B[63:32])) begin
+              // This lead put the masked word exactly where it belongs.
+              found    <= 1'b1;
+              geo_done <= 1'b1;
+              phase    <= P_DONE;
+            end else if (lead == 5'd15) begin
+              // Nothing worked. The phase is not the problem.
+              found    <= 1'b0;
+              geo_done <= 1'b1;
+              phase    <= P_DONE;
+            end else begin
+              lead     <= lead + 5'd1;
+              geo_data <= GEO_B;
+              wmask_on <= 1'b0;
+              phase    <= G_W16;
+            end
           end
         end
 
@@ -392,9 +409,13 @@ module k2g_psram_probe (
   logic [23:0] beat;
   always_ff @(posedge clk_out) beat <= beat + 24'd1;
 
-  wire logic [5:0] status = {beat[23], geo_128, geo_done,
-                             rd_done && !bad_lo && !bad_hi,
-                             init_calib, pll_lock};
+  // Two displays. While searching: the usual progress. Once finished: LED4 says
+  // whether a lead was found and LED3..0 spell it out in binary, which is worth
+  // more than four more progress bits at that point.
+  wire logic [5:0] status =
+      geo_done ? {beat[23], found, lead[3:0]}
+               : {beat[23], 1'b0, 1'b0,
+                  rd_done && !bad_lo && !bad_hi, init_calib, pll_lock};
 
   assign led = ~status;                 // active low
 

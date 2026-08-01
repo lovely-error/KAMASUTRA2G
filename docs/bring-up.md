@@ -80,23 +80,40 @@ result is on the LEDs.
 | 0 | PLL locked |
 | 1 | controller finished calibrating |
 | 2 | **write/read test passed** |
-| 3 | write-beat phase test finished |
-| 4 | **masked write landed on the right beat** (dark = wrong `WR_LEAD`) |
+| 3 | searching (see below for the finished display) |
+| 4 | — |
 | 5 | heartbeat, proving `clk_out` runs |
 
 **A burst covers 128 bytes — confirmed on hardware.** The earlier version of
 this test wrote a burst at word 16, then one at word 0, then read word 24; only
 a 32-word burst reaches word 24 from a write at 0, and it did.
 
-LED4 now answers the remaining question, which is the dangerous one: **when the
-16 write beats are sampled relative to `cmd_en`**. Reads are self-timed by
-`rd_data_valid` and need no guess. Writes do, and a masked write that guesses
-wrong puts the right word in the wrong place, clobbering its neighbours
-silently. The test fills a burst uniformly (mask open, phase-insensitive), then
-writes a different value over it with the mask open for **one beat only**, then
-reads that beat back: the low half must have changed and the high half must
-not. If LED4 is dark, change `WR_LEAD` in `k2g_psram_probe.sv` — it is 1, and
-0 and 2 are the candidates.
+### The write-beat search
+
+The remaining unknown is the dangerous one: **when the 16 write beats are
+sampled relative to `cmd_en`**. Reads are self-timed by `rd_data_valid` and
+need no guess. Writes do, and a masked write that guesses wrong puts the right
+word in the wrong place and clobbers its neighbours with no symptom.
+
+The probe fills a burst uniformly (mask open, so phase-insensitive), writes a
+different value over it with the mask open for **one beat only**, and reads that
+beat back — the low half must have changed and the high half must not. It tries
+every lead from 0 to 15 rather than one per flash.
+
+**The LEDs change meaning once it finishes:**
+
+| | while searching | when finished |
+|---|---|---|
+| LED5 | heartbeat | heartbeat |
+| LED4 | off | **a lead was found** |
+| LED3..0 | progress as above | **the lead, in binary** |
+
+A lead of 1 was tried first and failed, so LED4 lit with `0001` on LED3..0 is
+not what will come back.
+
+**If LED4 is dark after all sixteen**, the phase is not the problem — per-beat
+masking does not work the way this assumes, and the next thing to question is
+whether `data_mask` is sampled per beat at all rather than once per command.
 
 0 and 1 lit but never 2 is a controller that calibrated and then would not
 accept a command. Reaching 3 without 4 is a memory that is wired and answering
