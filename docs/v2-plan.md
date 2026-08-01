@@ -298,13 +298,23 @@ cosim green.
   pipeline, two caches, a CDC FIFO and the PSRAM IP. BSRAM is comfortable (8 of 22 free blocks);
   LUTs may not be. Synthesize each module as it is written and record the number. If it overflows,
   the levers in order are cache size, tag width, then the register file's third read port.
-- **UNRESOLVED: the register file has started using 3 BSRAM blocks.** It used none through 2a.
-  Synthesized standalone it still uses none — `RAM16SDP4:48 + RAM16SDP1:48`, all SSRAM — so this is
-  GowinSynthesis making a different mapping choice under whole-design pressure, not a source
-  change. It matters because **BSRAM reads are synchronous and the value array's read must be
-  asynchronous**; that is the assumption the entire single-cycle read → forward → ALU → address
-  path rests on (`docs/gowin-sv-support.md`). Establish which arrays those blocks implement before
-  trusting any of this on hardware. It also costs 3 of the 22 blocks budgeted for caches.
+- **The register file moved into 3 BSRAM blocks at 2b — investigated, and it is a win.** The
+  netlist has three `SDPB`, one per read port, holding the value array. Cause: registering the uop
+  gave synthesis a *registered read address*, which is exactly the shape a synchronous BSRAM read
+  needs, so it retimed those pipeline flops into the RAM's own address port. `grep -c '.Q(\uop.dst'`
+  over the netlist returns **0** — no flip-flop drives the read address, confirming absorption
+  rather than an added cycle. Register-then-async-read and address-register-then-sync-read are the
+  same timing, so the read is not delayed.
+
+  The array's reset-to-zero survived too: a per-entry written-mask is ANDed with the RAM output
+  (`LUT2 ... INIT=4'h8`), so an unwritten register still reads zero. That mask is what the SSRAM
+  left in `u_rf` now is.
+
+  Consequences: it is a large part of the 565-LUT drop, and it costs 3 blocks from the cache budget
+  (22 free → 19; the two 8 KB caches need 8). One fragility to keep in mind — the retiming depends
+  on the read address being a clean register output. Forwarding in 2c muxes read *data*, not
+  addresses, so it should hold; if a read address ever becomes combinational, expect a silent
+  fallback to SSRAM and a different Fmax.
 - **Silent toolchain failures.** `gw_sh` has exited 1 with no output at all. When a build fails
   without a message, bisect the source; there will be nothing to read.
 - **Guard simulation-only code on `SIMULATION`, never `SYNTHESIS`** — GowinSynthesis does not
