@@ -22,5 +22,5 @@ MEMORY_TYPE=W955D8MBYA
 PASR=full
 PSRAM_WIDTH=8
 REFRESH_RATE=normal
-SIMULATION=true
+SIMULATION=false
 Synthesis_tool=GowinSynthesis
