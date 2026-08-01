@@ -106,10 +106,29 @@ otherwise guesswork. Read it before changing anything here.
 | Is 135 MHz legal? | **Only if the IP was generated for it.** See below |
 | `cmd` polarity | Read `1'b0`, Write `1'b1` |
 | What does `addr` index? | A word; single-channel drives two ×8 dies so each address holds 4 bytes. 21 bits = 8 MB |
+| How big is a burst, really? | **128 bytes.** `Burst Mode` is bytes *per die* and there are two. See below |
 | Command spacing | Table 4-2 by burst length: 16→14, 32→18, **64→26**, 128→42 user clocks |
 
 The command interval was being violated outright — commands were issued about
 two cycles apart, gated only on `cmd_rdy`, which does not enforce it.
+
+### A burst is 128 bytes, not 64
+
+`Burst Mode = 64` is bytes **per die**, and single-channel mode drives two ×8
+dies in parallel. Derived from two statements in the guide that agree:
+
+- §4.4.3: "The write data occupies **16 CLK cycles** if the burst length is
+  64" — 16 beats × 64 bits = 128 bytes.
+- §4.4.2: successive bursts step the address by "burst length / 2" = 32 word
+  addresses, and each address holds 4 bytes = 128 bytes.
+
+So one burst covers 128 bytes, 16 user beats, 32 word addresses. A cache line
+matching one burst is **128 bytes**, which for an 8 KB direct-mapped cache is
+64 lines — 6-bit index, 7-bit offset, and about 768 tag flip-flops.
+
+**Not yet confirmed on hardware.** The probe writes and reads a single beat per
+burst, so it cannot tell 64 from 128. Writing a constant at one address and
+reading it back at address +16 and +31 within the same burst would settle it.
 
 ### The IP has a Simulation option, and it must be OFF for hardware
 
@@ -378,7 +397,9 @@ I/O standards at the bank defaults. The LEDs still light: they sit between the
 
 **Silent crashes are common.** Several constructs make `gw_sh` exit 1 with zero
 output — not even its startup banner. One was two 22-bit down-counters in a
-module that synthesized fine with either counter alone. Another was
-`div[$clog2(CLK_DIV)-1]`: `$clog2` inline in a part-select index, which is fine
-in Questa and fine as a `localparam` assigned first. When a build fails with no
+module that synthesized fine with either counter alone. Two more are width
+expressions: `$clog2` inline in a part-select index (`div[$clog2(CLK_DIV)-1]`)
+and a width cast in an expression (`21'(STEP * (N-1))`, `(AW+1)'(a && b)`).
+All three are fine in Questa, and fine when the value is assigned to a
+`localparam` or built with a concatenation first. When a build fails with no
 message, bisect the source; there will be no diagnostic to read.

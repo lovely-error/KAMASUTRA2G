@@ -372,15 +372,16 @@ cosim green.
 
 **Goal:** caches over the real 8 MB backing store, built once. (Was: before PSRAM's timing enters.
 
-- **`rtl/k2g_icache.sv`**, **`rtl/k2g_dcache.sv`** — direct-mapped, 8 KB each, 64-byte lines
-  matching the PSRAM IP's configured 64-byte burst so a refill is exactly one burst. D$ is
+- **`rtl/k2g_icache.sv`**, **`rtl/k2g_dcache.sv`** — direct-mapped, 8 KB each, **128-byte** lines
+  matching one PSRAM burst so a refill is exactly one burst. `Burst Mode = 64` is bytes per die
+  and there are two dies; see `docs/bring-up.md`. D$ is
   write-back with dirty bits and a victim writeback path. Confirm the IP's user-side beat count and
   `clk_out` from the IP sources rather than assuming them.
 - **Data arrays reuse `k2g_mem.sv`'s shape** — four byte lanes, one DPB each, instantiated not
   inferred. That structure exists because Gowin BSRAM has no per-byte write enables, and it is
   exactly what a cache data array needs. 8 blocks of the 22 free.
 - **A refill takes a bus lock.** `k2g_membus` carries one beat per request and has no burst length,
-  so the sixteen requests of a 64-byte line fill are not marked as one thing. The refilling master
+  so the requests of a 128-byte line fill are not marked as one thing. The refilling master
   holds the bus across the whole run. A line half-filled from two addresses is undetectable
   afterwards — it answers wrong forever, from a tag that says it is valid. The full reasoning is
   in `rtl/k2g_membus.sv`; the lock is the first thing to write, before either cache.

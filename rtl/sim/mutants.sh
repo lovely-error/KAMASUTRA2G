@@ -123,6 +123,14 @@ k2g_core.sv
 detect
 -
 cosim0
+--
+cdc-binary-not-gray-pointer
+k2g_cdc_fifo.sv
+  assign wgray_next = to_gray(wbin_next);
+  assign wgray_next = wbin_next;
+detect
+tb_cdc_fifo
+run
 EOF
 
 # ---- runner ------------------------------------------------------------

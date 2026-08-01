@@ -69,6 +69,9 @@ for f in "$RTL"/tb/k2g_*.sv; do
     [ -e "$f" ] && SOURCES+=("$f")
 done
 for f in "$RTL"/tb/tb_*.sv; do
+    # tb_psram instantiates the Gowin IP model; rtl/sim/psram.sh compiles it
+    # with that model and the primitive library.
+    [ "$(basename "$f")" = "tb_psram.sv" ] && continue
     [ -e "$f" ] && SOURCES+=("$f")
 done
 
@@ -117,6 +120,14 @@ for t in "${tests[@]}"; do
     out="$WORK/$t.log"
     # tb_cosim needs an image and the DPI shared object; rtl/sim/cosim.sh
     # drives it, including the random-seed sweep.
+    # tb_psram needs the IP's post-place-and-route model and Gowin's primitive
+    # library, neither of which this script compiles.
+    if [ "$t" = "tb_psram" ]; then
+        printf '%-24s SKIP  (run: bash rtl/sim/psram.sh)
+' "$t"
+        continue
+    fi
+
     if [ "$t" = "tb_cosim" ]; then
         printf '%-24s SKIP  (run: bash rtl/sim/cosim.sh)
 ' "$t"
