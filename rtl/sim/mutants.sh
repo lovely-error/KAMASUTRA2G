@@ -99,6 +99,14 @@ k2g_core.sv
 detect
 -
 icosim
+--
+csp-side-effect-while-held
+k2g_core.sv
+                            !mem_pending && !mulw_pending &&
+                            1'b1 &&
+detect
+-
+cosim40
 EOF
 
 # ---- runner ------------------------------------------------------------

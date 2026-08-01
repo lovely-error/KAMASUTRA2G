@@ -159,8 +159,27 @@ Measured: cosim identical at `ILATENCY=25`; credit of 2 rather than 1 is worth 2
 (570 vs 736 cycles) and 1.4% on `hello`, which is UART-bound. Fmax unchanged at 10.66 MHz / 28
 levels, and area is up ~200 LUT — this step buys latency tolerance, not timing. Timing is 2b/2c.
 
-**2b, 2c, 2d — still to do.** Split D from X, then X from M/W with forwarding, then shadow
-prefetch.
+**2b done — decode is its own stage.** A one-entry D→X register (not a skid: the backward `ready`
+path is short and a skid on a ~210-bit uop costs twice the flops for throughput D cannot use).
+`isa` travels with the uop, because by the time X runs, the F→D buffer has moved on.
+
+| | v1 | after 2a | after 2b |
+|---|---|---|---|
+| Fmax | 10.0 MHz | 10.66 MHz | **14.53 MHz** |
+| Logic levels | 28 | 28 | **21** |
+| Logic | 4695 | 4845 | 4280 |
+
+LUTs went *down* 565: with a register in the middle, synthesis optimizes decode and execute
+separately instead of flattening one cone.
+
+**It also found a real bug**, which is the argument for latency injection restated. Letting D run
+ahead meant a CSP store could sit in X behind a pending load and hand its byte to the transmitter
+*before* the instruction fired, then hand it over again on retiring — `fib` emitted five UART bytes
+against four, with every register still matching. Gating it on `take_uop` closes the
+`csp_req → csp_stall → stall → take_uop` loop, so it is gated on every *other* reason X might not
+fire. Locked in as the `csp-side-effect-while-held` mutant. The fix cost about 1.1 MHz.
+
+**2c, 2d — still to do.** Split X from M/W, which forces forwarding; then shadow prefetch.
 
 | Stage | Work |
 |---|---|
@@ -279,6 +298,13 @@ cosim green.
   pipeline, two caches, a CDC FIFO and the PSRAM IP. BSRAM is comfortable (8 of 22 free blocks);
   LUTs may not be. Synthesize each module as it is written and record the number. If it overflows,
   the levers in order are cache size, tag width, then the register file's third read port.
+- **UNRESOLVED: the register file has started using 3 BSRAM blocks.** It used none through 2a.
+  Synthesized standalone it still uses none — `RAM16SDP4:48 + RAM16SDP1:48`, all SSRAM — so this is
+  GowinSynthesis making a different mapping choice under whole-design pressure, not a source
+  change. It matters because **BSRAM reads are synchronous and the value array's read must be
+  asynchronous**; that is the assumption the entire single-cycle read → forward → ALU → address
+  path rests on (`docs/gowin-sv-support.md`). Establish which arrays those blocks implement before
+  trusting any of this on hardware. It also costs 3 of the 22 blocks budgeted for caches.
 - **Silent toolchain failures.** `gw_sh` has exited 1 with no output at all. When a build fails
   without a message, bisect the source; there will be nothing to read.
 - **Guard simulation-only code on `SIMULATION`, never `SYNTHESIS`** — GowinSynthesis does not

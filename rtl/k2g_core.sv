@@ -85,6 +85,12 @@ module k2g_core
   logic        redirect;
   logic [31:0] redirect_pc;
   logic        stall;
+  logic        d_block;   // D is holding a uop X will not take
+  logic        take_uop;  // X fires this cycle
+
+  // X's multi-cycle states, declared here because the CSP request has to know
+  // that something else is already holding the instruction.
+  logic        mem_pending, mulw_pending;
 
   // Declared here rather than with the rest of the sequential state because
   // the bus requests below have to know the machine is stopped.
@@ -132,8 +138,8 @@ module k2g_core
   wire logic [15:0] cp_d     = f2d.data[15:0];
   wire logic        cp_valid = f2d.valid;
 
-  // Decode takes a code point whenever it is not being held back.
-  assign f2d.ready = !stall && !halted_r;
+  // `f2d.ready` is driven by the D stage below, where the guard that decides
+  // whether a code point can be consumed lives.
   wire logic f2d_take = f2d.valid && f2d.ready;
 
   always_ff @(posedge clk) begin
@@ -172,16 +178,21 @@ module k2g_core
     end
   end
 
-  // ---- decode ------------------------------------------------------------
-  uop_t uop;
-  logic uop_valid;
+  // ---- D: decode ---------------------------------------------------------
+  // A rule with one guard: there is a code point, the machine is running, and
+  // if this code point finishes an instruction then X has somewhere to put it.
+  // Nothing else can hold decode up -- in particular a stalled execute stage no
+  // longer reaches back into the accumulator, which is what the old global
+  // `stall` did.
+  uop_t duop;                 // combinational, from the accumulator
+  logic duop_valid;           // this code point completes an instruction
   logic decode_en;
 
-  // Deliberately NOT gated by `stall`: the decoder's output is combinational,
-  // and routing the stall into it closes a loop through the CSP request. The
-  // stall freezes the accumulator via `hold` instead, and `take_uop` is what
-  // actually prevents an instruction retiring.
-  assign decode_en = cp_valid && !halted;
+  // Deliberately NOT gated by anything downstream of the decoder's own output:
+  // the decoder is combinational, and routing execute's state into `cp_valid`
+  // closes a loop through cp_valid -> uop_valid -> the CSP request -> stall.
+  // `hold` freezes the accumulator without touching that output.
+  assign decode_en = cp_valid && !halted_r;
 
   k2g_decode u_decode (
       .clk      (clk),
@@ -189,17 +200,54 @@ module k2g_core
       .cp       (cp_d),
       .cp_valid (decode_en),
       .flush    (redirect),
-      .hold     (stall),
+      .hold     (d_block),
       .accept   (),
-      .uop      (uop),
-      .uop_valid(uop_valid)
+      .uop      (duop),
+      .uop_valid(duop_valid)
   );
 
   // Address of the first code point of the instruction being completed.
   // `size_bytes` counts every code point including the current one, so the
   // start is that many bytes back. Displacements are relative to this, not to
   // the DISPI code point (spec 6.2).
-  wire logic [31:0] isa = pc_d - (uop.size_bytes - 32'd2);
+  wire logic [31:0] isa_d = pc_d - (duop.size_bytes - 32'd2);
+
+  // ---- D -> X ------------------------------------------------------------
+  // One entry, not a skid. The backward `ready` path is short here -- X's
+  // occupancy to D's hold -- and a skid on a ~210-bit uop would cost twice the
+  // flops for throughput this stage cannot use, since D produces at most one
+  // uop per code point anyway. Put a skid here only if timing says to.
+  //
+  // `isa` travels with the uop. It is computed from `pc_d`, which belongs to
+  // the code point still sitting in the F->D buffer, and by the time X runs
+  // that buffer has moved on.
+  uop_t        uop;
+  logic        uop_valid;
+  logic [31:0] isa;
+
+  // X has room when it is empty, or is about to empty by firing.
+  wire logic x_ready = !uop_valid || take_uop;
+
+  // D is blocked only when it is holding a finished instruction that X will
+  // not take. A partial prefix chain never blocks: it has nowhere to go yet.
+  assign d_block   = duop_valid && !x_ready;
+  assign f2d.ready = !d_block && !halted_r;
+
+  wire logic d_emit = f2d.valid && !d_block && !halted_r && duop_valid;
+
+  always_ff @(posedge clk) begin
+    if (!rst_n || redirect) begin
+      // A redirect discards whatever D just produced along with the buffer and
+      // the accumulator: it was fetched down the path not taken.
+      uop_valid <= 1'b0;
+    end else if (d_emit) begin
+      uop       <= duop;
+      isa       <= isa_d;
+      uop_valid <= 1'b1;
+    end else if (take_uop) begin
+      uop_valid <= 1'b0;
+    end
+  end
 
   // ---- register file -----------------------------------------------------
   logic [4:0]  ra_addr, rb_addr, rc_addr, w_addr;
@@ -326,7 +374,26 @@ module k2g_core
   // ---- CSP ---------------------------------------------------------------
   wire logic is_csp_load  = (uop.kind == UOP_CSP_LOAD);
   wire logic is_csp_store = (uop.kind == UOP_CSP_STORE);
-  wire logic csp_req      = uop_valid && cond_met && (is_csp_load || is_csp_store);
+  // A CSP access has SIDE EFFECTS -- it hands a byte to the transmitter, or
+  // consumes one from the receiver -- so it must not be issued merely because
+  // the instruction is sitting in X. It has to be issued only when nothing
+  // else is holding that instruction back.
+  //
+  // Before decode had its own stage this was safe by accident: a stalled
+  // execute stage froze the decoder, so the next instruction did not exist
+  // yet. Now D runs ahead, and a CSP store parked behind a pending load sent
+  // its byte during the wait and sent it again on retiring. `fib` emitted five
+  // UART bytes against the emulator's four, with every register still
+  // matching -- caught only under injected latency.
+  //
+  // It cannot be gated on `take_uop`: that closes the loop this file's `hold`
+  // input already exists to avoid, csp_req -> csp_stall -> stall -> take_uop.
+  // So it is gated on every OTHER reason X might not fire. For a CSP uop the
+  // data-bus term is always false (it is not a load or a store), which leaves
+  // exactly these two.
+  wire logic csp_req      = uop_valid && cond_met && !halted_r &&
+                            !mem_pending && !mulw_pending &&
+                            (is_csp_load || is_csp_store);
 
   logic [31:0] csp_rdata;
   logic        csp_bad_port;
@@ -367,13 +434,12 @@ module k2g_core
   // ---- multi-cycle sequencing --------------------------------------------
   // A load needs the memory read result, which arrives a cycle later; a
   // widening multiply needs a second cycle to write the high half.
-  logic        mem_pending, mulw_pending;
   logic [4:0]  pend_dst;
   logic [2:0]  pend_tag;
   logic [31:0] pend_lo;
   logic [1:0]  pend_addr_lo;
 
-  wire logic take_uop   = uop_valid && !stall && !halted;
+  assign     take_uop   = uop_valid && !stall && !halted_r;
   wire logic start_load = take_uop && cond_met && is_load &&
                           !misaligned && !out_of_range;
   wire logic start_mulw = take_uop && cond_met && (uop.kind == UOP_ARITH) &&
