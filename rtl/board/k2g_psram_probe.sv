@@ -17,9 +17,9 @@
 //
 //   LED0  PLL locked
 //   LED1  controller finished calibrating
-//   LED2  writes done
-//   LED3  reads done
-//   LED4  every readback matched          <- the one that matters
+//   LED2  write/read test passed          <- the one that matters
+//   LED3  burst geometry test finished
+//   LED4  a burst covers 128 bytes (dark = 64)
 //   LED5  heartbeat, proving clk_out runs
 //
 // A board that shows 0 and 1 lit but never 2 has a controller that calibrated
@@ -136,8 +136,9 @@ module k2g_psram_probe (
     return {~a, 11'h5A5, a, 11'h3C3};
   endfunction
 
-  typedef enum logic [2:0] {
-    P_WAIT, P_WRITE, P_WRITE_WAIT, P_READ, P_READ_WAIT, P_DONE
+  typedef enum logic [3:0] {
+    P_WAIT, P_WRITE, P_WRITE_WAIT, P_READ, P_READ_WAIT,
+    G_W16, G_W16W, G_W0, G_W0W, G_RD, G_RDW, P_DONE
   } phase_e;
 
   phase_e      phase;
@@ -191,8 +192,41 @@ module k2g_psram_probe (
 
   logic [5:0] gap;
 
-  assign wr_data   = pattern(idx);
-  assign addr      = idx;
+  // ---- burst geometry probe ----------------------------------------------
+  // A burst is believed to cover 128 bytes -- `Burst Mode` is bytes per die and
+  // single-channel drives two -- but that is derived from the guide, not
+  // observed, and the adapter's write path depends on it. Getting it wrong
+  // means writing a word and silently clobbering its neighbours.
+  //
+  // The test distinguishes the two possibilities by ORDER. Write a burst at
+  // word 16 with B, then a burst at word 0 with A, then read word 24:
+  //
+  //   burst spans 32 words (128 B): the burst at 0 covered 0..31, so 24 is A
+  //   burst spans 16 words  (64 B): the burst at 0 covered 0..15, so 24 is B
+  //
+  // Reading word 24 also shows whether a read may be issued at an address that
+  // is not burst-aligned: if the controller aligns internally, the answer comes
+  // from word 0 or 16 instead and matches neither expectation cleanly.
+  localparam logic [63:0] GEO_A = 64'hA5A5_1111_A5A5_1111;
+  localparam logic [63:0] GEO_B = 64'h5A5A_2222_5A5A_2222;
+
+  logic        geo;                     // geometry phase drives addr/data
+  logic [20:0] geo_addr;
+  logic [63:0] geo_data;
+  logic        geo_done, geo_128;
+
+  // Written as always_comb rather than ternaries in continuous assigns: a
+  // function call inside a conditional expression is another construct that
+  // makes gw_sh exit 1 with an empty log.
+  always_comb begin
+    if (geo) begin
+      wr_data = geo_data;
+      addr    = geo_addr;
+    end else begin
+      wr_data = pattern(idx);
+      addr    = idx;
+    end
+  end
   assign data_mask = 8'h00;             // write every byte
 
   always_ff @(posedge clk_out) begin
@@ -203,7 +237,12 @@ module k2g_psram_probe (
       cmd_en  <= 1'b0;
       wr_done <= 1'b0;
       rd_done <= 1'b0;
-      gap     <= 6'd0;
+      gap      <= 6'd0;
+      geo      <= 1'b0;
+      geo_addr <= 21'd0;
+      geo_data <= 64'd0;
+      geo_done <= 1'b0;
+      geo_128  <= 1'b0;
       cap        <= 64'd0;
       cap_exp    <= 64'd0;
       cap_valid  <= 1'b0;
@@ -254,12 +293,51 @@ module k2g_psram_probe (
           cap_exp   <= pattern(idx);
           cap_valid <= 1'b1;
           if (idx == LAST) begin
-            rd_done <= 1'b1;
-            phase   <= P_DONE;
+            rd_done  <= 1'b1;
+            geo      <= 1'b1;
+            geo_addr <= 21'd16;
+            geo_data <= GEO_B;
+            phase    <= G_W16;
           end else begin
             idx   <= idx + STEP;
             phase <= P_READ;
           end
+        end
+
+        // ---- geometry: write B at word 16, then A at word 0, read word 24
+        G_W16: if (cmd_rdy && (gap == 6'd0)) begin
+          cmd    <= 1'b1;
+          cmd_en <= 1'b1;
+          gap    <= TCMD;
+          phase  <= G_W16W;
+        end
+        G_W16W: begin
+          geo_addr <= 21'd0;
+          geo_data <= GEO_A;
+          phase    <= G_W0;
+        end
+
+        G_W0: if (cmd_rdy && (gap == 6'd0)) begin
+          cmd    <= 1'b1;
+          cmd_en <= 1'b1;
+          gap    <= TCMD;
+          phase  <= G_W0W;
+        end
+        G_W0W: begin
+          geo_addr <= 21'd24;
+          phase    <= G_RD;
+        end
+
+        G_RD: if (cmd_rdy && (gap == 6'd0)) begin
+          cmd    <= 1'b0;
+          cmd_en <= 1'b1;
+          gap    <= TCMD;
+          phase  <= G_RDW;
+        end
+        G_RDW: if (rd_data_valid) begin
+          geo_128  <= (rd_data == GEO_A);
+          geo_done <= 1'b1;
+          phase    <= P_DONE;
         end
 
         default: ;                      // P_DONE: stay
@@ -271,8 +349,9 @@ module k2g_psram_probe (
   logic [23:0] beat;
   always_ff @(posedge clk_out) beat <= beat + 24'd1;
 
-  wire logic [5:0] status = {beat[23], (phase == P_DONE) && !bad_lo && !bad_hi,
-                             rd_done, wr_done, init_calib, pll_lock};
+  wire logic [5:0] status = {beat[23], geo_128, geo_done,
+                             rd_done && !bad_lo && !bad_hi,
+                             init_calib, pll_lock};
 
   assign led = ~status;                 // active low
 

@@ -79,10 +79,15 @@ result is on the LEDs.
 |---|---|
 | 0 | PLL locked |
 | 1 | controller finished calibrating |
-| 2 | writes done |
-| 3 | reads done |
-| 4 | **every readback matched** |
+| 2 | **write/read test passed** |
+| 3 | burst geometry test finished |
+| 4 | **a burst covers 128 bytes** (dark = 64) |
 | 5 | heartbeat, proving `clk_out` runs |
+
+LED4 answers a question the adapter's write path depends on and that the guide
+only implies. The test writes a burst at word 16, then a burst at word 0, then
+reads word 24 — under a 32-word burst the second write covered word 24, under a
+16-word burst it did not, so the value read distinguishes them.
 
 0 and 1 lit but never 2 is a controller that calibrated and then would not
 accept a command. Reaching 3 without 4 is a memory that is wired and answering
@@ -126,9 +131,7 @@ So one burst covers 128 bytes, 16 user beats, 32 word addresses. A cache line
 matching one burst is **128 bytes**, which for an 8 KB direct-mapped cache is
 64 lines — 6-bit index, 7-bit offset, and about 768 tag flip-flops.
 
-**Not yet confirmed on hardware.** The probe writes and reads a single beat per
-burst, so it cannot tell 64 from 128. Writing a constant at one address and
-reading it back at address +16 and +31 within the same burst would settle it.
+The probe now tests this directly — see LED4 above.
 
 ### The IP has a Simulation option, and it must be OFF for hardware
 
@@ -397,9 +400,14 @@ I/O standards at the bank defaults. The LEDs still light: they sit between the
 
 **Silent crashes are common.** Several constructs make `gw_sh` exit 1 with zero
 output — not even its startup banner. One was two 22-bit down-counters in a
-module that synthesized fine with either counter alone. Two more are width
-expressions: `$clog2` inline in a part-select index (`div[$clog2(CLK_DIV)-1]`)
-and a width cast in an expression (`21'(STEP * (N-1))`, `(AW+1)'(a && b)`).
-All three are fine in Questa, and fine when the value is assigned to a
-`localparam` or built with a concatenation first. When a build fails with no
+module that synthesized fine with either counter alone. Three more are expressions in the wrong place: `$clog2` inline in a part-select
+index (`div[$clog2(CLK_DIV)-1]`), a width cast in an expression
+(`21'(STEP * (N-1))`, `(AW+1)'(a && b)`), and a **function call inside a
+ternary in a continuous assign** (`assign x = c ? y : f(z);`). All are fine in
+Questa. All are fine rewritten with the value assigned to a `localparam`
+first, built with a concatenation, or moved into an `always_comb`.
+
+The family is the point: GowinSynthesis dies silently on expressions it will
+not elaborate, and gives no clue which. When a build fails with an empty log,
+suspect the most recently added expression before suspecting anything else. When a build fails with no
 message, bisect the source; there will be no diagnostic to read.

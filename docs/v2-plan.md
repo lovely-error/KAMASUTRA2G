@@ -439,7 +439,30 @@ both machines.
 - **Guard simulation-only code on `SIMULATION`, never `SYNTHESIS`** — GowinSynthesis does not
   define the latter, and this has already caused one silent exit.
 - **The CDC is the one thing cosimulation cannot catch.** Lockstep comparison runs in one clock
-  domain and will never see a metastability failure. It needs constraints and hardware testing.
+  domain and will never see a metastability failure. Nor can `mutants.sh`: deleting a synchronizer
+  stage changes only latency in a zero-delay simulator, so a mutant for it reports `MISSED` forever
+  and none is carried.
+
+  **Standing rule: every crossing goes through `k2g_cdc_fifo`.** No ad-hoc synchronizers, anywhere.
+  That is not a preference — it is the only enforcement available here. Industry verifies this with
+  static CDC analysis (Spyglass, Questa CDC, Meridian), which enumerates every domain crossing and
+  checks each against known-good structures, flagging multi-bit crossings without gray coding,
+  fan-out from a first synchronizer stage, and reconvergence. Neither Questa Starter nor the Gowin
+  toolchain provides one, so the substitute is that there is exactly one crossing primitive and it
+  has been read carefully. A second one added quietly somewhere defeats it entirely.
+
+  What that primitive does and does not give: gray-coded pointers so a mid-flight sample is old or
+  new but never a blend; two flops on every crossing; data that never crosses at all, sitting in a
+  dual-port array addressed by an already-synchronized pointer; `syn_preserve` so the tool cannot
+  duplicate or retime the stages. It does **not** bound the placement distance between the two
+  flops — Gowin exposes no `ASYNC_REG` equivalent for that — so resolution time is whatever
+  placement gives. At 13.5 MHz there is a full 74 ns of period and the MTBF exponent is enormous,
+  but that rests on the clock being slow rather than on a constraint, and is worth revisiting if
+  the core ever runs faster.
+
+  And the `.sdc` **must** declare `clk_sys` and the controller's `clk_out` asynchronous. Until it
+  does, the tool tries to close timing on paths that can never be met, and may report success at
+  something meaningless.
 
 ## Verification
 
