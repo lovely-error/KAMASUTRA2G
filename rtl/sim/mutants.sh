@@ -91,6 +91,14 @@ k2g_core.sv
 detect
 -
 cosim40
+--
+abandoned-fetch-not-dropped
+k2g_core.sv
+  assign f2d_in.valid = if_answer && (drop == 2'd0);
+  assign f2d_in.valid = if_answer;
+detect
+-
+icosim
 EOF
 
 # ---- runner ------------------------------------------------------------
@@ -131,6 +139,7 @@ run_case() {
         run)     K2G_RTL="$SCRATCH/rtl" bash "$HERE/run.sh" "$tb" > "$log" 2>&1 ;;
         cosim0)  K2G_RTL="$SCRATCH/rtl" LATENCY=0  bash "$HERE/cosim.sh" 1 > "$log" 2>&1 ;;
         cosim40) K2G_RTL="$SCRATCH/rtl" LATENCY=40 bash "$HERE/cosim.sh" 1 > "$log" 2>&1 ;;
+        icosim)  K2G_RTL="$SCRATCH/rtl" ILATENCY=25 bash "$HERE/cosim.sh" 1 > "$log" 2>&1 ;;
     esac
 }
 

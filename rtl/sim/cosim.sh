@@ -45,6 +45,12 @@ COUNT="${COUNT:-250}"
 # does not own.
 LATENCY="${LATENCY:-0}"
 
+# Instruction-side latency, swept separately. A slow fetch and a slow load
+# exercise completely different machinery: credit-limited issue and abandoning
+# a mis-fetched stream on one side, the pending-load path on the other. A
+# single knob would let one hide the other's bugs.
+ILATENCY="${ILATENCY:-0}"
+
 [ -x "$QUESTA/vsim.exe" ] || { echo "questa not found at $QUESTA" >&2; exit 1; }
 
 # The emulator is loaded as a DPI-C shared object, so it must be built first.
@@ -79,7 +85,7 @@ run_one() {
     local log="$WORK/cosim_${label}.log"
     "$QUESTA/vsim.exe" -c -quiet -sv_lib "$DPI" \
         -do "onerror {quit -code 1}; run -all; quit -f" \
-        "+image=$img" "+latency=$LATENCY" tb_cosim > "$log" 2>&1
+        "+image=$img" "+latency=$LATENCY" "+ilatency=$ILATENCY" tb_cosim > "$log" 2>&1
     if grep -q TB_PASS "$log"; then
         local n c
         n=$(grep -oE 'retired=[0-9]+' "$log" | tail -1 | cut -d= -f2)
@@ -126,7 +132,7 @@ done
 
 echo
 if [ $fail -eq 0 ]; then
-    echo "COSIM PASS -- $total_checks architectural state comparisons, no divergence (latency 0..$LATENCY)"
+    echo "COSIM PASS -- $total_checks architectural state comparisons, no divergence (data 0..$LATENCY, insn 0..$ILATENCY)"
 else
     echo "COSIM FAIL"
 fi

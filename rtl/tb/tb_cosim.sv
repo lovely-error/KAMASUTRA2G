@@ -59,9 +59,13 @@ module tb_cosim
   logic        imem_en, dmem_en;
   logic [3:0]  dmem_we;
 
-  // Extra data-side latency, from +latency=N. Defaults to 0 so the normal run
-  // reproduces the fixed one-cycle port exactly; cosim.sh sweeps it.
-  int unsigned latency = 0;
+  // Extra memory latency, from +latency=N and +ilatency=N. Defaults to 0 so
+  // the normal run reproduces the fixed one-cycle ports exactly; cosim.sh
+  // sweeps them. The instruction side is swept separately because a slow
+  // fetch and a slow load exercise entirely different machinery -- credit and
+  // stream abandonment on one side, the pending-load path on the other.
+  int unsigned latency  = 0;
+  int unsigned ilatency = 0;
   logic        uart_tx_valid, uart_rx_take;
   logic [7:0]  uart_tx_data;
   logic        uart_tx_ready;
@@ -75,8 +79,23 @@ module tb_cosim
   retire_t     retire;
 
   k2g_membus dbus ();
+  k2g_membus ibus ();
 
   k2g_core #(.MEM_BYTES(MEM_BYTES)) dut (.*);
+
+  // The fetch port is read-only and 16-bit, so the same model serves it: `we`
+  // is always zero and the code point rides the low half of the response.
+  k2g_mem_slow u_islow (
+      .clk        (clk),
+      .rst_n      (rst_n),
+      .max_latency(ilatency),
+      .bus        (ibus),
+      .b_addr     (imem_addr),
+      .b_en       (imem_en),
+      .b_we       (),
+      .b_wdata    (),
+      .b_rdata    ({16'd0, imem_data})
+  );
 
   k2g_mem_slow u_slow (
       .clk        (clk),
@@ -226,6 +245,7 @@ module tb_cosim
     end
     void'($value$plusargs("max=%d", max_insns));
     void'($value$plusargs("latency=%d", latency));
+    void'($value$plusargs("ilatency=%d", ilatency));
     forever_ok = $test$plusargs("forever");
 
     load_both(image_path);

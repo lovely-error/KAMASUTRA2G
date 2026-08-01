@@ -1,18 +1,23 @@
 // K2G core.
 //
-// Fetch presents an address every cycle and the code point arrives the next,
-// so decode runs one stage behind. A completed instruction executes in that
-// same decode cycle -- register reads are asynchronous, so read, ALU and
-// writeback all fit -- except for memory and I/O accesses, which take one more
-// cycle and stall the front end.
+// Fetch requests code points from a bus that answers whenever it can, and they
+// queue in an elastic buffer that decode drains at its own rate. A completed
+// instruction still executes in its decode cycle -- register reads are
+// asynchronous, so read, ALU and writeback all fit -- except for memory and
+// I/O accesses, which wait for the bus and hold the front end.
 //
-// NOTE ON STRUCTURE. The plan calls for a 3-stage F/D/X pipeline with
-// zero-bubble branches via a shadow fetch on the free data port. This is
-// simpler than that: correctness first, measured against the emulator by
-// cosimulation, with pipelining as a follow-on the cosimulation then makes
-// safe to attempt. The pieces that make the fast version possible -- the
-// prefix accumulator, the split register file, the separate jump latch -- are
-// all here already.
+// NOTE ON STRUCTURE. This is mid-conversion, and deliberately so. Both memory
+// ports now speak k2g_membus and tolerate arbitrary latency, which is what a
+// cache in front of PSRAM will need; the execute path is still v1's single
+// combinational cycle, which is why Fmax is still around 10 MHz and 28 logic
+// levels deep.
+//
+// Splitting decode from execute, and then execute from writeback, is what
+// breaks that path -- see docs/v2-plan.md Phase 2. Those stages become guarded
+// atomic rules and this file's global `stall` disappears rather than being
+// carried forward and renamed. The pieces that make it possible -- the prefix
+// accumulator, the split register file, the separate jump latch -- are all
+// here already.
 
 `include "k2g_types.svh"
 
@@ -25,10 +30,9 @@ module k2g_core
     input  logic        clk,
     input  logic        rst_n,
 
-    // Instruction fetch port.
-    output logic [31:0] imem_addr,
-    output logic        imem_en,
-    input  logic [15:0] imem_data,
+    // Instruction fetch port. Read-only; the code point is the low halfword
+    // of each response.
+    k2g_membus.master   ibus,
 
     // Data port. A channel rather than a fixed one-cycle access: what answers
     // it is BSRAM today and a write-back data cache over PSRAM later, and the
@@ -61,19 +65,112 @@ module k2g_core
 );
 
   // ---- fetch -------------------------------------------------------------
-  logic [31:0] pc;        // address presented to IMEM this cycle
-  logic [31:0] pc_d;      // address of the code point available this cycle
-  logic        cp_valid;
+  // Fetch asks the bus for one code point at a time and the answers arrive
+  // whenever the bus gets to them -- next cycle from BSRAM, tens of cycles
+  // from an instruction cache that misses. They land in an elastic buffer that
+  // decode drains at its own rate.
+  //
+  // ISSUE IS CREDIT-LIMITED, NOT ACKNOWLEDGED. Nothing is requested unless the
+  // F->D buffer is guaranteed to have room for the answer, because the bus has
+  // no response backpressure by design (k2g_membus.sv). Waiting for each
+  // answer before asking again would be simpler and would halve fetch
+  // throughput: BSRAM answers in one cycle, so a request must go out in the
+  // same cycle the previous answer arrives to keep one code point per cycle.
+  localparam int F2D_DEPTH = 2;      // k2g_skid's capacity
+
+  logic [31:0] pc;
+  logic [1:0]  inflight;     // requested, not yet handed to decode
+  logic [1:0]  outstanding;  // requested, not yet answered
+  logic [1:0]  drop;         // answers still owed to a stream we walked away from
   logic        redirect;
   logic [31:0] redirect_pc;
   logic        stall;
 
   // Declared here rather than with the rest of the sequential state because
-  // the data bus request below has to know the machine is stopped.
+  // the bus requests below have to know the machine is stopped.
   logic        halted_r, faulted_r;
 
-  assign imem_addr = pc;
-  assign imem_en   = !stall;
+  // A pure function of state. Nothing here looks at `req_ready` (rule 3) or at
+  // `redirect`, which would drag the data bus's ready into the fetch path.
+  assign ibus.req_valid = !halted_r && (inflight < 2'(F2D_DEPTH));
+  assign ibus.req.addr  = pc;
+  assign ibus.req.we    = 4'b0000;
+  assign ibus.req.wdata = 32'd0;
+
+  wire logic if_issue  = ibus.req_valid && ibus.req_ready;
+  wire logic if_answer = ibus.rsp_valid;
+
+  // Responses are in order, so the address that belongs to each one is simply
+  // the oldest still-unanswered request. Two entries, because at most two are
+  // ever outstanding.
+  logic [31:0] issue_addr [0:1];
+  logic        issue_wp, issue_rp;
+
+  // ---- F->D buffer -------------------------------------------------------
+  // Payload is the code point and the address it came from. The address has to
+  // travel with it: `isa` is computed from it, and by the time an instruction
+  // completes, fetch has long since moved on.
+  k2g_chan #(.WIDTH(48)) f2d_in ();
+  k2g_chan #(.WIDTH(48)) f2d ();
+
+  // An answer belonging to an abandoned stream is discarded here rather than
+  // buffered. `valid` is a pulse and never has to be held, because the credit
+  // above guarantees the buffer has room -- which is the only reason a
+  // response with no `ready` can drive a channel at all.
+  assign f2d_in.valid = if_answer && (drop == 2'd0);
+  assign f2d_in.data  = {issue_addr[issue_rp], ibus.rsp_data[15:0]};
+
+  k2g_skid #(.WIDTH(48)) u_f2d (
+      .clk  (clk),
+      .rst_n(rst_n),
+      .flush(redirect),
+      .up   (f2d_in),
+      .down (f2d)
+  );
+
+  wire logic [31:0] pc_d     = f2d.data[47:16];
+  wire logic [15:0] cp_d     = f2d.data[15:0];
+  wire logic        cp_valid = f2d.valid;
+
+  // Decode takes a code point whenever it is not being held back.
+  assign f2d.ready = !stall && !halted_r;
+  wire logic f2d_take = f2d.valid && f2d.ready;
+
+  always_ff @(posedge clk) begin
+    if (!rst_n) begin
+      pc          <= 32'd0;
+      inflight    <= 2'd0;
+      outstanding <= 2'd0;
+      drop        <= 2'd0;
+      issue_wp    <= 1'b0;
+      issue_rp    <= 1'b0;
+    end else begin
+      if (if_issue) begin
+        issue_addr[issue_wp] <= pc;
+        issue_wp             <= ~issue_wp;
+        pc                   <= pc + 32'd2;
+      end
+      if (if_answer) issue_rp <= ~issue_rp;
+
+      outstanding <= outstanding + (if_issue ? 2'd1 : 2'd0)
+                                 - (if_answer ? 2'd1 : 2'd0);
+
+      if (redirect) begin
+        // Everything already asked for belongs to the old stream, including a
+        // request issued this very cycle -- it used the old `pc`. The buffer
+        // is flushed, but answers already in the bus cannot be recalled, so
+        // they are counted and thrown away as they arrive.
+        pc       <= redirect_pc;
+        inflight <= 2'd0;
+        drop     <= outstanding + (if_issue ? 2'd1 : 2'd0)
+                                - (if_answer ? 2'd1 : 2'd0);
+      end else begin
+        inflight <= inflight + (if_issue  ? 2'd1 : 2'd0)
+                             - (f2d_take  ? 2'd1 : 2'd0);
+        if (if_answer && (drop != 2'd0)) drop <= drop - 2'd1;
+      end
+    end
+  end
 
   // ---- decode ------------------------------------------------------------
   uop_t uop;
@@ -89,7 +186,7 @@ module k2g_core
   k2g_decode u_decode (
       .clk      (clk),
       .rst_n    (rst_n),
-      .cp       (imem_data),
+      .cp       (cp_d),
       .cp_valid (decode_en),
       .flush    (redirect),
       .hold     (stall),
@@ -606,9 +703,6 @@ module k2g_core
 
   always_ff @(posedge clk) begin
     if (!rst_n) begin
-      pc              <= 32'd0;
-      pc_d            <= 32'd0;
-      cp_valid        <= 1'b0;
       nisa            <= 32'd0;
       nisa_valid      <= 1'b0;
       halted_r        <= 1'b0;
@@ -625,15 +719,7 @@ module k2g_core
       pend_addr_lo    <= 2'd0;
       sticky_ordering <= 1'b0;
     end else if (!halted_r) begin
-      // Fetch advances unless something is stalling the front end.
-      if (redirect) begin
-        pc       <= redirect_pc;
-        cp_valid <= 1'b0;
-      end else if (!stall) begin
-        pc       <= pc + 32'd2;
-        pc_d     <= pc;
-        cp_valid <= 1'b1;
-      end
+      // Fetch sequencing lives in its own block above; this one is execute.
 
       // Second cycles complete here. A load's does not: `mem_pending` is
       // cleared by the bus answering, however many cycles that takes, rather

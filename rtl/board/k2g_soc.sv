@@ -133,6 +133,22 @@ module k2g_soc
   // bridge is the degenerate slave -- always ready, answers next cycle -- and
   // is what a cache replaces in Phase 3 without the core noticing.
   k2g_membus dbus ();
+  k2g_membus ibus ();
+
+  // The same bridge serves the fetch port: it is a read-only 16-bit port, so
+  // `we` and `wdata` go nowhere and the code point rides the low half of the
+  // response. k2g_mem keeps its own halfword select, which is gated by `a_en`
+  // and so stays in step with a request-driven enable.
+  k2g_bsram_port u_iport (
+      .clk    (clk_sys),
+      .rst_n  (cpu_rst_n),
+      .bus    (ibus),
+      .b_addr (imem_addr),
+      .b_en   (imem_en),
+      .b_we   (),
+      .b_wdata(),
+      .b_rdata({16'd0, imem_data})
+  );
 
   k2g_bsram_port u_dport (
       .clk    (clk_sys),
@@ -180,9 +196,7 @@ module k2g_soc
   k2g_core #(.MEM_BYTES(MEM_BYTES)) u_core (
       .clk          (clk_sys),
       .rst_n        (cpu_rst_n),
-      .imem_addr    (imem_addr),
-      .imem_en      (imem_en),
-      .imem_data    (imem_data),
+      .ibus         (ibus),
       .dbus         (dbus),
       .uart_tx_valid(core_tx_valid),
       .uart_tx_data (core_tx_data),

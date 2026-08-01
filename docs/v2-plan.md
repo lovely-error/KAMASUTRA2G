@@ -120,10 +120,8 @@ is variable.
 The core's **data** port is now a `k2g_membus` master. `LATENCY=40 bash rtl/sim/cosim.sh` produces
 results identical to `LATENCY=0`, across all 22 programs.
 
-**Still to do:** the **instruction** port still assumes a fixed one-cycle answer. Converting it
-needs credit-based issue and an elastic F→D buffer — otherwise one-outstanding-request fetch halves
-throughput — and that is a rewrite of the fetch unit, which is Phase 2's first job. It is done
-there rather than twice.
+The **instruction** port followed as Phase 2's first step (below); both buses now tolerate
+arbitrary latency.
 
 - **`rtl/k2g_chan.svh`** — `docs/gowin-sv-support.md` measured `interface` + `modport` as PASS
   (probe 04) and `struct packed` as PASS (02, 08), so `docs/attic/pipe.sv`'s handshake shape is
@@ -150,6 +148,19 @@ result in the plan.
 ## Phase 2 — the five-stage pipeline
 
 **Goal:** break the 28-level path. Still on BSRAM; no caches yet.
+
+**2a done — elastic fetch.** The instruction port is a `k2g_membus` master with credit-limited
+issue and a `k2g_skid` F→D buffer. Fetch never asks for a code point the buffer might not have room
+for, which is what lets the bus have no response backpressure. A branch redirect flushes the buffer
+and *counts* the answers still owed to the abandoned stream, discarding them as they arrive —
+requests already accepted cannot be recalled.
+
+Measured: cosim identical at `ILATENCY=25`; credit of 2 rather than 1 is worth 29% on `fib`
+(570 vs 736 cycles) and 1.4% on `hello`, which is UART-bound. Fmax unchanged at 10.66 MHz / 28
+levels, and area is up ~200 LUT — this step buys latency tolerance, not timing. Timing is 2b/2c.
+
+**2b, 2c, 2d — still to do.** Split D from X, then X from M/W with forwarding, then shadow
+prefetch.
 
 | Stage | Work |
 |---|---|
