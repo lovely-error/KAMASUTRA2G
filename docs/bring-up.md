@@ -29,8 +29,8 @@ Flash with either the Gowin Programmer GUI or:
 openFPGALoader -b tangnano9k rtl/board/out/soc/impl/pnr/project.fs
 ```
 
-**Stages 1, 2 and 4 have run on hardware**, on a Tang Nano 9K over the on-board
-USB serial bridge at 115200 8N1. Stage 3, PSRAM, has not been flashed yet. `fibforever` counts the 32-bit Fibonacci
+**All four stages have run on hardware**, on a Tang Nano 9K over the on-board
+USB serial bridge at 115200 8N1. `fibforever` counts the 32-bit Fibonacci
 sequence a term per second and wraps back to zero after 2971215073.
 
 Utilization and timing figures below come from place-and-route reports; the
@@ -65,7 +65,8 @@ Connect at **115200 8N1** to the board's USB serial port and type.
 ## Stage 3 — PSRAM
 
 The in-package PSRAM on its own: a PLL, the Gowin controller, its calibration,
-and a write-then-read-back check. **Not yet run on hardware.**
+and a write-then-read-back check. **Passes on hardware** — LED0 through LED4
+all lit, so the PLL locks, calibration completes, and every readback matches.
 
 It earns a stage because it brings three things nothing before it has — a PLL,
 a controller that must calibrate before it answers, and a clock domain that is
