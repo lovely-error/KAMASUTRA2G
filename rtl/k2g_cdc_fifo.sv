@@ -61,8 +61,23 @@ module k2g_cdc_fifo #(
   logic [AW:0] rbin, rgray, rbin_next, rgray_next;
 
   // Each pointer after two flops in the other domain.
-  logic [AW:0] wgray_meta, wgray_sync;
-  logic [AW:0] rgray_meta, rgray_sync;
+  //
+  // `syn_preserve` stops GowinSynthesis optimizing these (SUG550 5.13:
+  // "preserves register without optimization"). Without it the tool is free to
+  // retime logic into the chain or duplicate a stage to ease fan-out -- and a
+  // duplicated synchronizer flop is two flops that can resolve to different
+  // values from the same metastable input, which is the failure the chain
+  // exists to prevent. It is the local equivalent of ASYNC_REG.
+  //
+  // It does not force the pair to be placed close together, which is the other
+  // half of what ASYNC_REG buys; Gowin exposes no attribute for that here. The
+  // resolution time is therefore whatever placement gives, and the .sdc
+  // declaring the domains asynchronous is what stops the tool trying to close
+  // timing across them at all.
+  logic [AW:0] wgray_meta /* synthesis syn_preserve = 1 */;
+  logic [AW:0] wgray_sync /* synthesis syn_preserve = 1 */;
+  logic [AW:0] rgray_meta /* synthesis syn_preserve = 1 */;
+  logic [AW:0] rgray_sync /* synthesis syn_preserve = 1 */;
 
   function automatic logic [AW:0] to_gray(input logic [AW:0] b);
     return b ^ (b >> 1);
