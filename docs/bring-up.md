@@ -28,8 +28,12 @@ Flash with either the Gowin Programmer GUI or:
 openFPGALoader -b tangnano9k rtl/board/out/soc/impl/pnr/project.fs
 ```
 
-**These have not been run on hardware.** Everything below is from
-place-and-route reports and simulation.
+**All three stages have run on hardware**, on a Tang Nano 9K over the on-board
+USB serial bridge at 115200 8N1. `fibforever` counts the 32-bit Fibonacci
+sequence a term per second and wraps back to zero after 2971215073.
+
+Utilization and timing figures below come from place-and-route reports; the
+behaviour is observed.
 
 ## Stage 1 — blink
 
