@@ -328,9 +328,49 @@ The ISA-specific traps, each of which is a real one:
 
 ---
 
-## Phase 3 — instruction and data caches
+> **Phases 3 and 4 were swapped.** As originally written, caches came first and the 8 KB BSRAM
+> served as main memory. That is degenerate: an 8 KB cache over 8 KB of memory has one line per
+> address, so every miss is a cold miss and the write-back path never evicts anything dirty. Making
+> the cache small enough to exercise properly would mean sizing it for this phase and again for the
+> next, and building a refill path against 4-byte BSRAM reads that PSRAM's burst then replaces.
+>
+> The original justification — prove caches "before PSRAM's timing enters" — has already been
+> banked elsewhere: what needed de-risking was whether the core tolerates variable latency, and that
+> is Phase 1's gate, green at `LATENCY=40`. Cosim never sees real PSRAM in either order anyway;
+> simulating the Gowin IP through calibration is not practical, so main memory in simulation is
+> `k2g_mem_slow` at high latency regardless.
+>
+> The core already tolerates arbitrary latency, so PSRAM without a cache works — slowly — and the
+> machine stays runnable in between.
 
-**Goal:** caches proven against BSRAM-backed slow memory, before PSRAM's timing enters.
+## Phase 3 — PSRAM
+
+- **`rtl/k2g_psram.sv`** — wraps `PSRAM_Memory_Interface_HS_Top` from
+  `K2606/src/psram_memory_interface_hs/`: 21-bit address, 64-bit user data, 64-byte bursts,
+  `memory_clk` 166 MHz, initial latency 6. `K2606/src/psram_ctrl.sv` is **empty** — there is no
+  existing controller to build on. Nothing may issue a command before `init_calib`.
+- **`rtl/k2g_cdc_fifo.sv`** — core domain ↔ PSRAM `clk_out`. Do **not** port `docs/attic/pipe.sv`'s
+  `PipeCDC` as written: its salt bits cross domains with no synchronizer flops, which is a
+  metastability bug rather than a style difference. Gray-coded async FIFO, two-flop synchronizers
+  on each pointer, and constrain the crossing in `rtl/board/tangnano9k.sdc` — an unconstrained CDC
+  passes timing analysis and fails on hardware.
+- **Boot.** The ROM-and-copier scheme in `k2g_soc.sv` stays; GowinSynthesis still will not
+  initialize memory from `$readmemh`. The copier targets PSRAM and waits for `init_calib`.
+- **`MEM_BYTES` becomes 8 MB** in `k2g_core.sv`, `k2g_soc.sv`, `tb_cosim.sv` and the emulator. That
+  moves the `ADDR_OUT_OF_RANGE` boundary, which is architecturally visible, so both move in one
+  commit.
+- Add a **`psram` bring-up stage** to `rtl/board/build.sh` and `docs/bring-up.md`, between
+  `loopback` and `soc`. The staged structure exists so a failure says which layer is at fault; a
+  new layer earns a new stage.
+
+**Gate:** psram bitstream passes on hardware; `soc` runs `hello` and `fibforever` at `CLK_DIV = 1`;
+cosim green.
+
+---
+
+## Phase 4 — instruction and data caches
+
+**Goal:** caches over the real 8 MB backing store, built once. (Was: before PSRAM's timing enters.
 
 - **`rtl/k2g_icache.sv`**, **`rtl/k2g_dcache.sv`** — direct-mapped, 8 KB each, 64-byte lines
   matching the PSRAM IP's configured 64-byte burst so a refill is exactly one burst. D$ is
@@ -365,31 +405,6 @@ fetch across this range". Spec §3.2 and §10 need widening to say so.
 
 **Gate:** cosim green; new `tb_icache` / `tb_dcache` green; a self-modifying-code program passes on
 both machines.
-
----
-
-## Phase 4 — PSRAM
-
-- **`rtl/k2g_psram.sv`** — wraps `PSRAM_Memory_Interface_HS_Top` from
-  `K2606/src/psram_memory_interface_hs/`: 21-bit address, 64-bit user data, 64-byte bursts,
-  `memory_clk` 166 MHz, initial latency 6. `K2606/src/psram_ctrl.sv` is **empty** — there is no
-  existing controller to build on. Nothing may issue a command before `init_calib`.
-- **`rtl/k2g_cdc_fifo.sv`** — core domain ↔ PSRAM `clk_out`. Do **not** port `docs/attic/pipe.sv`'s
-  `PipeCDC` as written: its salt bits cross domains with no synchronizer flops, which is a
-  metastability bug rather than a style difference. Gray-coded async FIFO, two-flop synchronizers
-  on each pointer, and constrain the crossing in `rtl/board/tangnano9k.sdc` — an unconstrained CDC
-  passes timing analysis and fails on hardware.
-- **Boot.** The ROM-and-copier scheme in `k2g_soc.sv` stays; GowinSynthesis still will not
-  initialize memory from `$readmemh`. The copier targets PSRAM and waits for `init_calib`.
-- **`MEM_BYTES` becomes 8 MB** in `k2g_core.sv`, `k2g_soc.sv`, `tb_cosim.sv` and the emulator. That
-  moves the `ADDR_OUT_OF_RANGE` boundary, which is architecturally visible, so both move in one
-  commit.
-- Add a **`psram` bring-up stage** to `rtl/board/build.sh` and `docs/bring-up.md`, between
-  `loopback` and `soc`. The staged structure exists so a failure says which layer is at fault; a
-  new layer earns a new stage.
-
-**Gate:** psram bitstream passes on hardware; `soc` runs `hello` and `fibforever` at `CLK_DIV = 1`;
-cosim green.
 
 ---
 
