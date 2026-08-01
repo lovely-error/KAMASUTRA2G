@@ -348,9 +348,18 @@ module k2g_psram_probe (
           cmd    <= 1'b1;               // uniform fill, mask wide open
           cmd_en <= 1'b1;
           gap    <= TCMD;
+          wbeat  <= 5'd0;
           phase  <= G_W16W;
         end
-        G_W16W: begin
+
+        // HOLD THE FILL DATA FOR THE WHOLE BURST. Changing wr_data the cycle
+        // after cmd_en leaves the background half written with one value and
+        // half with the other, so the readback compares against a background
+        // that never existed -- which is what made the first version of this
+        // test report failure for every lead. The geometry test did not have
+        // this bug because it only changed the ADDRESS after issuing, never
+        // the data.
+        G_W16W: if (wbeat == 5'd16) begin
           geo_data <= GEO_A;
           wmask_on <= 1'b1;
           phase    <= G_W0;

@@ -111,9 +111,23 @@ every lead from 0 to 15 rather than one per flash.
 A lead of 1 was tried first and failed, so LED4 lit with `0001` on LED3..0 is
 not what will come back.
 
-**If LED4 is dark after all sixteen**, the phase is not the problem — per-beat
-masking does not work the way this assumes, and the next thing to question is
-whether `data_mask` is sampled per beat at all rather than once per command.
+**A dark LED4 does not necessarily mean the phase is wrong.** The first run of
+this search reported failure for all sixteen leads, and the fault was in the
+test: it changed `wr_data` the cycle after `cmd_en`, while the uniform fill
+burst was still streaming, so the background was half one value and half the
+other and no lead could ever match. Write data must be **held for the whole
+burst**.
+
+That is worth remembering generally — `cmd_en` is one cycle but the transfer it
+starts is sixteen, and anything feeding it has to stay still for all of them.
+The geometry test escaped this only because it changed the address after
+issuing, never the data.
+
+If LED4 is dark *after* that fix, then the phase really is not the problem, and
+the next thing to question is whether `data_mask` is sampled per beat at all
+rather than once per command. If it is not, partial writes need read-modify-
+write with a full-burst writeback and the mask held wide open — more work per
+write, but no masking to get wrong.
 
 0 and 1 lit but never 2 is a controller that calibrated and then would not
 accept a command. Reaching 3 without 4 is a memory that is wired and answering
