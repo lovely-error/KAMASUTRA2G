@@ -1,5 +1,13 @@
-// Constraints specific to the `soc` stage.
+// Constraints for the `soc` stage. SELF-CONTAINED.
 //
+// A stage file replaces the shared tangnano9k.sdc rather than adding to it:
+// Gowin will not resolve a clock created in one file from a constraint in
+// another, so `set_clock_groups` naming clk_27m failed with "Cannot get clock
+// with name" when the crystal was constrained next door. Every file that needs
+// a clock creates it.
+
+create_clock -name clk_27m -period 37.037 -waveform {0 18.5} [get_ports {clk_27m}]
+
 // The core runs on a divide-by-2 of the crystal: 13.5 MHz, 74.074 ns. With
 // decode split into its own stage the execute path places at 16.3 MHz, so it
 // meets this with margin; it would still fail at the full 27 MHz.

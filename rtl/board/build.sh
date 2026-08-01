@@ -60,10 +60,17 @@ esac
 
 rm -rf "$WORK"; mkdir -p "$WORK"
 for f in "${SRC[@]}"; do cp "$f" "$WORK/"; done
-cp "$HERE/tangnano9k.cst" "$HERE/tangnano9k.sdc" "$WORK/"
-# Stage-specific timing, if any. Constraints naming nets that exist in only one
-# design must not go in the shared file: Gowin errors on a missing object.
-[ -f "$HERE/tangnano9k_$STAGE.sdc" ] && cp "$HERE/tangnano9k_$STAGE.sdc" "$WORK/"
+cp "$HERE/tangnano9k.cst" "$WORK/"
+# Timing: a stage file REPLACES the shared one rather than adding to it. Gowin
+# will not resolve a clock created in one .sdc from a constraint in another, so
+# split constraints fail with "Cannot get clock with name". Stage files are
+# self-contained; stages without one use the shared file.
+if [ -f "$HERE/tangnano9k_$STAGE.sdc" ]; then
+    SDC="tangnano9k_$STAGE.sdc"
+else
+    SDC="tangnano9k.sdc"
+fi
+cp "$HERE/$SDC" "$WORK/"
 cp "$RTL/k2g_types.svh" "$WORK/" 2>/dev/null || true
 cp "$HERE/k2g_rom.svh" "$WORK/" 2>/dev/null || true
 # Memory init files, if the stage needs them.
@@ -79,8 +86,7 @@ cp "$HERE"/*.hex "$WORK/" 2>/dev/null || true
         esac
     done
     echo "add_file -type cst {tangnano9k.cst}"
-    echo "add_file -type sdc {tangnano9k.sdc}"
-    [ -f "$WORK/tangnano9k_$STAGE.sdc" ] && echo "add_file -type sdc {tangnano9k_$STAGE.sdc}"
+    echo "add_file -type sdc {$SDC}"
     echo "set_option -top_module $TOP"
     echo "set_option -verilog_std sysv2017"
     echo "set_option -include_path {.}"
