@@ -88,6 +88,21 @@ accept a command. Reaching 3 without 4 is a memory that is wired and answering
 but returning wrong data, which points at the memory clock rather than the
 logic.
 
+**LED0 and LED5 only — PLL locked, `clk_out` running, calibration never
+finishing — was the first hardware result.** The cause found so far: the
+controller was handed the raw reset button, which is pulled up and therefore
+reads released from the instant power is applied, so it came out of reset
+before the PLL had locked and never got another one. It now waits for lock to
+hold for ~10 us. If that symptom persists, the next thing to change is the
+memory clock in `k2g_pll.sv` — 162 MHz is `FBDIV_SEL=5, ODIV_SEL=4`, closer to
+the 166 the IP was configured for, at the cost of the timing margin described
+below.
+
+Ruled out by measurement rather than argument: the IP's `clk` input. The
+post-synthesis netlist has 155 flip-flops on `clk_out` and 14 on `clk_27m`,
+and those 14 are the reset chain above — so the controller drives nothing from
+`clk` in this configuration and its frequency cannot be the problem.
+
 | | |
 |---|---|
 | Logic | 1395 / 8640 (17%) |

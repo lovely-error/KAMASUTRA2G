@@ -54,6 +54,39 @@ module k2g_psram_probe (
       .pll_lock  (pll_lock)
   );
 
+  // ---- reset for the controller ------------------------------------------
+  // The controller was previously handed the raw button. It is pulled up, so
+  // it reads high from the instant power is applied -- the controller comes
+  // out of reset BEFORE the PLL has locked, with `memory_clk` still garbage,
+  // and never gets another reset to recover with. k2g_soc builds a reset chain
+  // for exactly this reason; the probe did not carry it over.
+  //
+  // Held low until the PLL has reported lock continuously for ~10 us, and
+  // re-asserted if lock is ever lost. The button is synchronized rather than
+  // used raw: releasing reset out of step with the clock is a reliable way to
+  // start in an undefined state.
+  logic       btn_meta, btn_sync;
+  logic       lock_meta, lock_sync;
+  logic [8:0] rst_cnt;
+  logic       psram_rst_n;
+
+  always_ff @(posedge clk_27m) begin
+    btn_meta  <= rst_n;
+    btn_sync  <= btn_meta;
+    lock_meta <= pll_lock;
+    lock_sync <= lock_meta;
+
+    if (!btn_sync || !lock_sync) begin
+      rst_cnt     <= 9'd0;
+      psram_rst_n <= 1'b0;
+    end else if (rst_cnt != 9'h1FF) begin
+      rst_cnt     <= rst_cnt + 9'd1;
+      psram_rst_n <= 1'b0;
+    end else begin
+      psram_rst_n <= 1'b1;
+    end
+  end
+
   // ---- controller --------------------------------------------------------
   logic [63:0] wr_data, rd_data;
   logic        rd_data_valid;
@@ -65,7 +98,7 @@ module k2g_psram_probe (
       .clk            (clk_27m),
       .memory_clk     (memory_clk),
       .pll_lock       (pll_lock),
-      .rst_n          (rst_n),
+      .rst_n          (psram_rst_n),
       .O_psram_ck     (O_psram_ck),
       .O_psram_ck_n   (O_psram_ck_n),
       .IO_psram_dq    (IO_psram_dq),
@@ -88,9 +121,9 @@ module k2g_psram_probe (
   logic [3:0] rsync;
   wire  logic srst_n = rsync[3];
 
-  always_ff @(posedge clk_out or negedge rst_n) begin
-    if (!rst_n) rsync <= 4'd0;
-    else        rsync <= {rsync[2:0], 1'b1};
+  always_ff @(posedge clk_out or negedge psram_rst_n) begin
+    if (!psram_rst_n) rsync <= 4'd0;
+    else              rsync <= {rsync[2:0], 1'b1};
   end
 
   // ---- the test ----------------------------------------------------------
