@@ -88,6 +88,30 @@ result is on the LEDs.
 this test wrote a burst at word 16, then one at word 0, then read word 24; only
 a 32-word burst reaches word 24 from a write at 0, and it did.
 
+### The PSRAM interface, as measured
+
+Everything the adapter needs, confirmed on hardware rather than inferred. Each
+line here cost a flash; none of it should be re-derived.
+
+| Property | Value |
+|---|---|
+| `addr` | word address, 4 bytes per word, 21 bits = 8 MB |
+| One burst | **128 bytes** — 32 word addresses, 16 user beats of 64 bits |
+| `cmd` | `0` read, `1` write |
+| Minimum gap between commands | **26 user clocks** at burst 64 (Table 4-2) |
+| Write beat 0 | **the same cycle as `cmd_en`** — lead 0 |
+| Write data | must be **held for all 16 beats** |
+| `data_mask` | per **byte** of the 64-bit beat, `1` masks, `0` writes |
+| `data_mask` timing | sampled **per beat**, so partial writes work |
+| Reads | self-timed — count `rd_data_valid`, beat 0 is the first |
+| `cmd_rdy` | high before `init_calib`; not a "ready to use" gate |
+| `clk_out` | `memory_clk / 2` = 67.5 MHz |
+
+For a 32-bit access at byte address `A`: `word = A[22:2]`, burst base is
+`word & ~31`, the word sits in beat `word[4:1]` and in the low half when
+`word[0]` is 0. A partial write opens `data_mask` for that beat only, with
+`~we` on the relevant four byte lanes and `4'hF` on the others.
+
 ### The write-beat search
 
 The remaining unknown is the dangerous one: **when the 16 write beats are

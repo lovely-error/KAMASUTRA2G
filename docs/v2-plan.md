@@ -363,6 +363,16 @@ The ISA-specific traps, each of which is a real one:
   `loopback` and `soc`. The staged structure exists so a failure says which layer is at fault; a
   new layer earns a new stage.
 
+**3a and the interface are done.** The PSRAM bring-up stage passes on hardware and every property
+the adapter depends on is measured and tabulated in `docs/bring-up.md` — burst geometry, command
+spacing, write-beat phase, mask semantics. `rtl/k2g_cdc_fifo.sv` is written and tested.
+
+**Still to write: `rtl/k2g_psram.sv`.** A `k2g_membus` slave pair (`ibus`, `dbus`) in `clk_sys`
+with a simple arbiter, across `k2g_cdc_fifo` in both directions, into a burst sequencer in
+`clk_out`. Reads are self-timed off `rd_data_valid`; writes hold data for 16 beats and open the
+mask on one. It needs a behavioural model of the controller to test against, since the real IP
+cannot converge in simulation without a memory device.
+
 **Gate:** psram bitstream passes on hardware; `soc` runs `hello` and `fibforever` at `CLK_DIV = 1`;
 cosim green.
 
