@@ -157,10 +157,28 @@ module k2g_psram_probe (
   logic        cap_valid, cap_valid2;
   logic        bad_lo, bad_hi;
 
-  // The burst is 64 bytes, so consecutive commands step the address by the
-  // burst rather than by one word.
-  localparam logic [20:0] STEP = 21'd16;
-  localparam logic [20:0] LAST = 21'd240;   // STEP * (N_WORDS-1)
+  // Each address stores 4 bytes -- single-channel mode drives two x8 dies and
+  // the IP presents them as one word address (IPUG943 4.4.2), so 21 bits spans
+  // the full 8 MB.
+  //
+  // The guide says successive bursts step by "burst length / 2", which reads
+  // as either 8 or 16 here depending on whether burst length means the
+  // configured burst_num of 16 or the count of 16-bit words in 64 bytes. A
+  // bring-up probe does not have to resolve that: stepping by 1024 puts every
+  // access in a different region whichever reading is right, and overlapping
+  // bursts cannot make a broken path look like a working one.
+  localparam logic [20:0] STEP = 21'd1024;
+  localparam logic [20:0] LAST = 21'd15360;   // STEP * (N_WORDS-1)
+
+  // MINIMUM COMMAND INTERVAL. IPUG943 4.4.2, Table 4-2: with a burst length of
+  // 16 the interval between any two commands must be at least 14 user clocks,
+  // regardless of whether they are reads or writes. `cmd_rdy` alone does not
+  // enforce it -- this FSM was issuing commands about two cycles apart, which
+  // is a straight violation of the IP's contract and would corrupt the very
+  // readback it exists to check. 16 for margin.
+  localparam logic [5:0] TCMD = 6'd16;
+
+  logic [5:0] gap;
 
   assign wr_data   = pattern(idx);
   assign addr      = idx;
@@ -174,6 +192,7 @@ module k2g_psram_probe (
       cmd_en  <= 1'b0;
       wr_done <= 1'b0;
       rd_done <= 1'b0;
+      gap     <= 6'd0;
       cap        <= 64'd0;
       cap_exp    <= 64'd0;
       cap_valid  <= 1'b0;
@@ -183,6 +202,7 @@ module k2g_psram_probe (
     end else begin
       cmd_en     <= 1'b0;
       cap_valid  <= 1'b0;
+      if (gap != 6'd0) gap <= gap - 6'd1;
       cap_valid2 <= cap_valid;
       if (cap_valid)  bad_lo <= bad_lo | (cap[31:0]  != cap_exp[31:0]);
       if (cap_valid2) bad_hi <= bad_hi | (cap[63:32] != cap_exp[63:32]);
@@ -190,9 +210,10 @@ module k2g_psram_probe (
       unique case (phase)
         P_WAIT: if (init_calib) phase <= P_WRITE;
 
-        P_WRITE: if (cmd_rdy) begin
-          cmd    <= 1'b1;               // write
+        P_WRITE: if (cmd_rdy && (gap == 6'd0)) begin
+          cmd    <= 1'b1;               // write (IPUG943: 1 write, 0 read)
           cmd_en <= 1'b1;
+          gap    <= TCMD;
           phase  <= P_WRITE_WAIT;
         end
 
@@ -207,9 +228,10 @@ module k2g_psram_probe (
           end
         end
 
-        P_READ: if (cmd_rdy) begin
+        P_READ: if (cmd_rdy && (gap == 6'd0)) begin
           cmd    <= 1'b0;               // read
           cmd_en <= 1'b1;
+          gap    <= TCMD;
           phase  <= P_READ_WAIT;
         end
 

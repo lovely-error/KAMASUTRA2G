@@ -93,15 +93,37 @@ finishing — was the first hardware result.** The cause found so far: the
 controller was handed the raw reset button, which is pulled up and therefore
 reads released from the instant power is applied, so it came out of reset
 before the PLL had locked and never got another one. It now waits for lock to
-hold for ~10 us. If that symptom persists, the next thing to change is the
-memory clock in `k2g_pll.sv` — 162 MHz is `FBDIV_SEL=5, ODIV_SEL=4`, closer to
-the 166 the IP was configured for, at the cost of the timing margin described
-below.
+hold for ~10 us. ### What the IP user guide settles
+
+`IPUG943-1.5E`, in `C:\Gowin\...\IDE\doc\EN\`, answers most of what was
+otherwise guesswork. Read it before changing anything here.
+
+| Question | Answer |
+|---|---|
+| What is `clk`? | "Reference input clock, usually on-board crystal oscillator clock" — 27 MHz is right |
+| What is `clk_out`? | "user-Logic design clock, 1/2 Memory Clk" — confirms the measured 67.5 |
+| Is 135 MHz legal? | **Yes.** "Memory Clock Expected frequency 50 MHz~166 MHz" |
+| `cmd` polarity | Read `1'b0`, Write `1'b1` |
+| What does `addr` index? | A word; single-channel drives two ×8 dies so each address holds 4 bytes. 21 bits = 8 MB |
+| Command spacing | **≥ 14 user clocks between any two commands** at burst length 16 (Table 4-2) |
+
+Two of those changed the code. The command interval was being violated
+outright — commands were issued about two cycles apart, gated only on
+`cmd_rdy`, which does not enforce it. And the memory clock being legal at 135
+removes the theory that it explains a failed calibration.
 
 Ruled out by measurement rather than argument: the IP's `clk` input. The
 post-synthesis netlist has 155 flip-flops on `clk_out` and 14 on `clk_27m`,
 and those 14 are the reset chain above — so the controller drives nothing from
 `clk` in this configuration and its frequency cannot be the problem.
+
+### Simulating it
+
+Not viable out of the box. `psram_memory_interface_hs.vo` is a readable
+post-PnR model and `prim_sim.v` ships with the IDE, so the *controller* would
+elaborate — but no model of the memory device (W955D8MBYA) exists anywhere in
+the install. Calibration against an undriven bus would hang for a different
+reason than hardware does, which is worse than not simulating at all.
 
 | | |
 |---|---|
