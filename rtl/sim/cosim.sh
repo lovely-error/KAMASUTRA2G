@@ -22,9 +22,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # are not reachable from WSL and the resulting error is misleading.
 . "$HERE/shell_check.sh"
 k2g_require_windows_shell || exit 1
-RTL="$(cd "$HERE/.." && pwd)"
-ROOT="$(cd "$RTL/.." && pwd)"
-WORK="$HERE/work"
+# ROOT comes from this script's own location, never from RTL: `mutants.sh`
+# points K2G_RTL at a throwaway copy of the sources, and the emulator, the
+# programs and the DPI object must still come from the real tree.
+ROOT="$(cd "$HERE/../.." && pwd)"
+RTL="$(cd "${K2G_RTL:-$HERE/..}" && pwd)"
+WORK="$RTL/sim/work"
 
 SEEDS="${1:-20}"
 ONE_IMAGE="${2:-}"

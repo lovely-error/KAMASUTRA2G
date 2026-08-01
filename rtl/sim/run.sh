@@ -18,9 +18,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # are not reachable from WSL and the resulting error is misleading.
 . "$HERE/shell_check.sh"
 k2g_require_windows_shell || exit 1
-RTL="$(cd "$HERE/.." && pwd)"
-ROOT="$(cd "$RTL/.." && pwd)"
-WORK="$HERE/work"
+# ROOT is derived from this script's own location, never from RTL: `mutants.sh`
+# points K2G_RTL at a throwaway copy of the sources, and the emulator, the
+# programs and the DPI object must still come from the real tree.
+ROOT="$(cd "$HERE/../.." && pwd)"
+RTL="$(cd "${K2G_RTL:-$HERE/..}" && pwd)"
+WORK="$RTL/sim/work"
 
 VLOG="$QUESTA/vlog.exe"
 VSIM="$QUESTA/vsim.exe"
@@ -105,7 +108,7 @@ for spec in "${PROGRAMS[@]}"; do
     img="${spec%%:*}"
     src="$ROOT/emu/programs/${img%.bin}.kasm"
     [ -f "$src" ] || continue
-    ( cd "$ROOT/emu" && cargo run --quiet --bin kasm --         "programs/$(basename "$src")" -o "$HERE/$img" ) > /dev/null 2>&1
+    ( cd "$ROOT/emu" && cargo run --quiet --bin kasm --         "programs/$(basename "$src")" -o "$WORK/$img" ) > /dev/null 2>&1
 done
 
 fail=0
@@ -123,9 +126,9 @@ for t in "${tests[@]}"; do
         for spec in "${PROGRAMS[@]}"; do
             img="${spec%%:*}"
             want="${spec##*:}"
-            [ -f "$HERE/$img" ] || continue
+            [ -f "$WORK/$img" ] || continue
             plog="$WORK/tb_core_${img%.bin}.log"
-            "$VSIM" -c -quiet -do "onerror {quit -code 1}; run -all; quit -f"                 "+image=$HERE/$img" "+expect=$want" tb_core > "$plog" 2>&1
+            "$VSIM" -c -quiet -do "onerror {quit -code 1}; run -all; quit -f"                 "+image=$WORK/$img" "+expect=$want" tb_core > "$plog" 2>&1
             if grep -q "TB_PASS" "$plog" && ! grep -qE '^# \*\* (Error|Fatal)' "$plog"; then
                 n=$(grep -oE 'instructions: [0-9]+' "$plog" | tail -1 | cut -d' ' -f2)
                 printf '%-24s PASS  %s instructions

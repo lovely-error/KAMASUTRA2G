@@ -73,6 +73,7 @@ and say so.
 cd emu && cargo test          # emulator, assembler, spec conformance
 bash rtl/sim/run.sh           # RTL directed testbenches + program runs
 bash rtl/sim/cosim.sh         # lockstep RTL vs emulator, incl. random programs
+bash rtl/sim/mutants.sh       # break the RTL on purpose; the tests must notice
 ```
 
 The third is the one that matters most. It steps both machines one instruction
@@ -87,6 +88,36 @@ A failing seed is reproducible:
 ```bash
 cd emu && cargo run --release --bin kgen -- --seed 7 --count 250 -o r.bin
 ```
+
+Injectable memory latency, because a model that always answers in one cycle cannot tell a design
+that tolerates variable latency from one that merely works at one cycle:
+
+```bash
+LATENCY=40 bash rtl/sim/cosim.sh
+```
+
+A stall is architecturally invisible by construction — nothing commits during one — so every
+latency setting must give byte-for-byte identical results. Anything else means the core is reading
+state it does not own.
+
+### Tests that are supposed to fail
+
+A passing testbench proves nothing on its own; it might be checking something that cannot fail.
+`rtl/sim/mutants.sh` breaks the design on purpose and requires the testbenches to *notice*:
+
+| Mutant | Caught by |
+|---|---|
+| `up.ready` follows `down.ready` — a channel's rule 3 | `tb_chan` |
+| one-entry buffer instead of two — passes everything else, runs at half rate | `tb_chan` |
+| skid buffer ignores `flush` | `tb_chan` |
+| a load assumes memory answers in one cycle | `cosim` **only with `LATENCY` set** |
+
+The last row is the argument for latency injection existing at all: that mutant passes the entire
+cosimulation at `LATENCY=0` and diverges after 41 instructions at `LATENCY=40`.
+
+Mutations apply to a throwaway copy of `rtl/`, never to the tree. A mutation whose pattern no
+longer matches is reported as `STALE` and fails the run, rather than being skipped — a guard that
+has quietly stopped guarding is the exact thing this is meant to prevent.
 
 ## Building
 

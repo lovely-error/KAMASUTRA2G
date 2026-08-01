@@ -251,4 +251,7 @@ The third is the one that matters. New verification this plan adds:
   range, `MPI`/`MPD` prefetch.
 - **A self-modifying-code program** in `emu/programs/`, run under cosim. The only test that proves
   the write-back D$ and the I$ agree.
+- **`rtl/sim/mutants.sh`** — negative tests. Every new guard added by a phase gets a mutant that it
+  is required to catch, so "this test passes" is never the whole claim. A mutation whose pattern
+  stops matching fails the run rather than being skipped.
 - **Fmax read from the place-and-route report at every phase gate**, not only at the end.
