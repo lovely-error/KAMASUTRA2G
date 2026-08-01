@@ -37,6 +37,48 @@ PSRAM through an instruction and a data cache, with lockstep cosimulation green 
 throughout as **channels** — module `k2g_chan`. The design idea is unchanged: sequential processes
 connected only by typed, buffered, back-pressured channels. Only the label moves out of the way.
 
+## Stages are guarded atomic transactions
+
+A stage is not "some logic with a stall input". It is a **rule**: a guard, and an effect that
+happens entirely or not at all.
+
+```
+guard   = every input has an item
+        & every output has room
+        & every resource the effect needs is free
+effect  = consume those inputs, produce those outputs, update that state
+```
+
+Nothing partially commits. There is no global `stall` signal in v2 — a stage that cannot fire
+simply does not fire, and its inputs stay offered.
+
+This is not an aesthetic choice. The v1 `stall` expression is a disjunction of independently-added
+terms, and getting one wrong is easy in a way that reads fine: the first Phase 1 rewrite of it
+allowed the next instruction to retire in the same cycle a load wrote back, because that term was
+reasoned about on its own and the value array's **single write port** was not in view. A guard that
+has to name every resource it consumes does not let that mistake be spelled.
+
+So the register file's one write port (`k2g_regfile.sv`) is an explicit resource in the guard of
+every rule that writes it, alongside the obvious ones. Same for the jump latch and the data bus.
+
+### The one real tension, resolved
+
+Guarded firing wants a rule's guard to include downstream readiness. Channels forbid `valid` from
+depending combinationally on `ready` (`k2g_chan.sv`, rule 3). Taken naively together these
+contradict each other, and the contradiction is the combinational loop the decoder's `hold` input
+already exists to avoid.
+
+Bluespec resolves this with a scheduler. Hand-written RTL resolves it by placement:
+
+- A stage's **output `valid` is a function of its own state** — "my output register holds an item" —
+  and never of `ready`.
+- A stage's **guard** may read downstream `ready`, and drives its **input `ready`**. `ready`
+  depending on `ready` is legal and loop-free.
+
+That leaves one long combinational chain: `ready` propagating backwards through every stage at
+once. `k2g_skid` is where that chain is cut — its `up.ready` is a register. Put one wherever the
+backward path gets long enough to cost timing, which is measured, not guessed.
+
 ## The constraint that shapes the order of work
 
 `rtl/tb/tb_cosim.sv` is what makes this refactor attemptable, and it is also the most fragile
@@ -120,6 +162,10 @@ result in the plan.
 Split `k2g_core.sv` into `k2g_fetch.sv`, `k2g_exec.sv`, `k2g_lsu.sv`, `k2g_forward.sv`, leaving
 `k2g_core.sv` as stage instantiation and channel wiring.
 
+Each stage is written as a guarded atomic rule per the section above — one `*_can_fire` expression
+naming every input, output and resource, with every state update and every handshake gated on it.
+The v1 global `stall` disappears; it does not get carried forward and renamed.
+
 The ISA-specific traps, each of which is a real one:
 
 - **Forwarding must be per field.** `k2g_regfile.sv` has independent write enables for value, tag,
@@ -162,6 +208,11 @@ The ISA-specific traps, each of which is a real one:
 - **Data arrays reuse `k2g_mem.sv`'s shape** — four byte lanes, one DPB each, instantiated not
   inferred. That structure exists because Gowin BSRAM has no per-byte write enables, and it is
   exactly what a cache data array needs. 8 blocks of the 22 free.
+- **A refill takes a bus lock.** `k2g_membus` carries one beat per request and has no burst length,
+  so the sixteen requests of a 64-byte line fill are not marked as one thing. The refilling master
+  holds the bus across the whole run. A line half-filled from two addresses is undetectable
+  afterwards — it answers wrong forever, from a tag that says it is valid. The full reasoning is
+  in `rtl/k2g_membus.sv`; the lock is the first thing to write, before either cache.
 - Tags in flip-flops: 23-bit space, 7-bit index, 6-bit offset → 10 tag bits + valid (+ dirty) ×
   128 lines. Registers are at 12% utilization.
 

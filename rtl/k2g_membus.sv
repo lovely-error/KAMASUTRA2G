@@ -26,6 +26,27 @@
 // an earlier miss is still outstanding would break that, so it must not --
 // which is a real constraint on the Phase 3 design and is written here rather
 // than discovered there.
+//
+// ---- a beat is not a transaction ----
+//
+// This bus deliberately carries ONE BEAT per request. It has no burst length,
+// and a multi-beat transfer is a run of separate requests.
+//
+// That matters because a cache line fill is 64 bytes -- one PSRAM command
+// which then streams its beats -- and as far as this bus is concerned that
+// arrives as sixteen ordinary requests with nothing marking them as one
+// thing. Nothing here enforces their atomicity.
+//
+// So the master issuing them must hold the bus for the whole run: a refill
+// takes a "burst in progress" lock and no other master may interleave a
+// request into the middle of it. A line half-filled from one address and half
+// from another is not detectable after the fact -- it just answers wrong
+// forever, from a tag that says it is valid.
+//
+// The alternative was a length field, making a burst one transaction. It was
+// weighed and not taken: it puts beat-counting into every slave including the
+// trivial BSRAM one, where a lock puts it only in the two masters that
+// actually burst.
 
 interface k2g_membus;
 
