@@ -170,13 +170,24 @@ module k2g_psram_probe (
   localparam logic [20:0] STEP = 21'd1024;
   localparam logic [20:0] LAST = 21'd15360;   // STEP * (N_WORDS-1)
 
-  // MINIMUM COMMAND INTERVAL. IPUG943 4.4.2, Table 4-2: with a burst length of
-  // 16 the interval between any two commands must be at least 14 user clocks,
-  // regardless of whether they are reads or writes. `cmd_rdy` alone does not
-  // enforce it -- this FSM was issuing commands about two cycles apart, which
-  // is a straight violation of the IP's contract and would corrupt the very
-  // readback it exists to check. 16 for margin.
-  localparam logic [5:0] TCMD = 6'd16;
+  // MINIMUM COMMAND INTERVAL. IPUG943 Table 4-2 maps the configured burst
+  // length to the number of user clocks that must separate any two commands,
+  // read or write:
+  //
+  //     burst 16 -> 14      burst 32 -> 18
+  //     burst 64 -> 26      burst 128 -> 42
+  //
+  // The IP is generated for 32-byte bursts (psram_param.v: Burst_Length =
+  // "32_Bytes", burst_num = 8), so the requirement is 18. 24 for margin.
+  //
+  // `cmd_rdy` does not enforce this. The first version of this FSM issued
+  // commands about two cycles apart; the second used 16, from reading the
+  // guide's "when the burst length is 16 ... at least 14" as if it described
+  // this design, when that row is for a 16-byte burst mode and the IP was then
+  // configured for 64 -- which needs 26. Both were violations, and both would
+  // have corrupted the readback this stage exists to check and been blamed on
+  // the memory.
+  localparam logic [5:0] TCMD = 6'd24;
 
   logic [5:0] gap;
 

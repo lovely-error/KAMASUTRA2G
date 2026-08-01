@@ -105,7 +105,7 @@ otherwise guesswork. Read it before changing anything here.
 | Is 135 MHz legal? | **Only if the IP was generated for it.** See below |
 | `cmd` polarity | Read `1'b0`, Write `1'b1` |
 | What does `addr` index? | A word; single-channel drives two ×8 dies so each address holds 4 bytes. 21 bits = 8 MB |
-| Command spacing | **≥ 14 user clocks between any two commands** at burst length 16 (Table 4-2) |
+| Command spacing | Table 4-2 by burst length: 16→14, **32→18**, 64→26, 128→42 user clocks |
 
 The command interval was being violated outright — commands were issued about
 two cycles apart, gated only on `cmd_rdy`, which does not enforce it.
