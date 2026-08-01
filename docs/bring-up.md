@@ -102,15 +102,39 @@ otherwise guesswork. Read it before changing anything here.
 |---|---|
 | What is `clk`? | "Reference input clock, usually on-board crystal oscillator clock" — 27 MHz is right |
 | What is `clk_out`? | "user-Logic design clock, 1/2 Memory Clk" — confirms the measured 67.5 |
-| Is 135 MHz legal? | **Yes.** "Memory Clock Expected frequency 50 MHz~166 MHz" |
+| Is 135 MHz legal? | **Only if the IP was generated for it.** See below |
 | `cmd` polarity | Read `1'b0`, Write `1'b1` |
 | What does `addr` index? | A word; single-channel drives two ×8 dies so each address holds 4 bytes. 21 bits = 8 MB |
 | Command spacing | **≥ 14 user clocks between any two commands** at burst length 16 (Table 4-2) |
 
-Two of those changed the code. The command interval was being violated
-outright — commands were issued about two cycles apart, gated only on
-`cmd_rdy`, which does not enforce it. And the memory clock being legal at 135
-removes the theory that it explains a failed calibration.
+The command interval was being violated outright — commands were issued about
+two cycles apart, gated only on `cmd_rdy`, which does not enforce it.
+
+### The memory clock is a GENERATION parameter, not an operating range
+
+"Memory Clock — Expected frequency — 50 MHz~166 MHz" appears in Table 6-1,
+**Static Parameters**. It is what the IP is *generated* for, and the generated
+instance bakes in latency and calibration timing for that number. It is not a
+range a given instance tolerates at runtime.
+
+The IP in `K2606/` was generated at **166 MHz** (`MEMORY_CLK=166` in the
+`.ipc`) and `k2g_pll.sv` feeds it **135**. That mismatch is the standing
+explanation for calibration never completing, and it supersedes an earlier
+claim here that 135 was "comfortably legal" — that misread a configuration
+option as an operating tolerance.
+
+Two ways to resolve it, and the second is better:
+
+1. **Feed it 166 as generated.** `k2g_pll.sv` can make 166.5 MHz with
+   `IDIV_SEL=5, FBDIV_SEL=36, ODIV_SEL=4`. But `clk_out` is then 83 MHz and
+   the probe logic placed at about 82 — it would not meet timing, which is
+   what drove the clock down in the first place.
+2. **Regenerate the IP for a lower Memory Clock.** Everything else unchanged:
+   `W955D8MBYA`, 1 channel, Psram Width 8, Dq Width 16, Addr Width 21, Burst
+   Mode 64, Fixed Latency. At 135 MHz the user clock is 67.5 and the probe has
+   11.5% margin, already measured. Lower still — 108, for a 54 MHz user clock
+   — costs nothing that matters: a 13.5 MHz core wants about 0.4 Gbit/s and
+   even 54 MHz × 64 bits is 3.4.
 
 Ruled out by measurement rather than argument: the IP's `clk` input. The
 post-synthesis netlist has 155 flip-flops on `clk_out` and 14 on `clk_27m`,
