@@ -207,8 +207,34 @@ module k2g_psram_probe (
   // Reading word 24 also shows whether a read may be issued at an address that
   // is not burst-aligned: if the controller aligns internally, the answer comes
   // from word 0 or 16 instead and matches neither expectation cleanly.
-  localparam logic [63:0] GEO_A = 64'hA5A5_1111_A5A5_1111;
-  localparam logic [63:0] GEO_B = 64'h5A5A_2222_5A5A_2222;
+  // Halves deliberately differ, so a readback names which half it came from.
+  localparam logic [63:0] GEO_B = 64'h2222_BBBB_1111_AAAA;   // background
+  localparam logic [63:0] GEO_A = 64'hCCCC_DDDD_CCCC_DDDD;   // the masked word
+
+  // WHEN ARE THE 16 WRITE BEATS SAMPLED? The guide says write data "occupies 16
+  // CLK cycles" but not where they start relative to cmd_en, and a masked write
+  // that guesses wrong puts the right word in the wrong place -- silently
+  // clobbering its neighbours. Reads need no such guess; they are self-timed by
+  // rd_data_valid.
+  //
+  // The test: fill a burst uniformly with B (phase-insensitive, mask 0), then
+  // write A over it with the mask open for ONE beat only, then check that the
+  // intended word changed and its neighbours did not. Target word 6 = beat 3,
+  // low half, so the mask opens bytes 0..3 on beat 3 alone.
+  //
+  // If LED4 is dark, this is the number to change.
+  localparam int          WR_LEAD  = 1;      // beats start this many cycles after cmd_en
+  localparam int          TGT_BEAT = 3;       // word 6 = beat 3, low half
+
+  // Elaborated to a constant rather than cast at use. Counting the beat from
+  // cmd_en and shifting the comparison avoids preloading the counter with a
+  // negative value, which needs a width cast -- and width casts in expressions
+  // are one of the constructs that kill gw_sh silently.
+  localparam logic [4:0] MASK_AT = TGT_BEAT + WR_LEAD;
+  localparam logic [4:0] READ_AT = TGT_BEAT;
+
+  logic [4:0] wbeat;                         // 0..16, counts burst beats
+  logic       wmask_on;
 
   logic        geo;                     // geometry phase drives addr/data
   logic [20:0] geo_addr;
@@ -227,7 +253,12 @@ module k2g_psram_probe (
       addr    = idx;
     end
   end
-  assign data_mask = 8'h00;             // write every byte
+
+  // Open only for the target beat during the masked write; wide open otherwise.
+  always_comb begin
+    if (wmask_on) data_mask = (wbeat == MASK_AT) ? 8'hF0 : 8'hFF;
+    else          data_mask = 8'h00;
+  end
 
   always_ff @(posedge clk_out) begin
     if (!srst_n) begin
@@ -243,6 +274,8 @@ module k2g_psram_probe (
       geo_data <= 64'd0;
       geo_done <= 1'b0;
       geo_128  <= 1'b0;
+      wbeat    <= 5'd0;
+      wmask_on <= 1'b0;
       cap        <= 64'd0;
       cap_exp    <= 64'd0;
       cap_valid  <= 1'b0;
@@ -253,6 +286,8 @@ module k2g_psram_probe (
       cmd_en     <= 1'b0;
       cap_valid  <= 1'b0;
       if (gap != 6'd0) gap <= gap - 6'd1;
+      if ((phase == G_RDW) ? rd_data_valid : (wbeat != 5'd16))
+        wbeat <= wbeat + 5'd1;
       cap_valid2 <= cap_valid;
       if (cap_valid)  bad_lo <= bad_lo | (cap[31:0]  != cap_exp[31:0]);
       if (cap_valid2) bad_hi <= bad_hi | (cap[63:32] != cap_exp[63:32]);
@@ -304,40 +339,48 @@ module k2g_psram_probe (
           end
         end
 
-        // ---- geometry: write B at word 16, then A at word 0, read word 24
+        // ---- write-beat phase: fill with B, mask A over one beat, verify
         G_W16: if (cmd_rdy && (gap == 6'd0)) begin
-          cmd    <= 1'b1;
+          cmd    <= 1'b1;               // uniform fill, mask wide open
           cmd_en <= 1'b1;
           gap    <= TCMD;
           phase  <= G_W16W;
         end
         G_W16W: begin
-          geo_addr <= 21'd0;
           geo_data <= GEO_A;
+          wmask_on <= 1'b1;
           phase    <= G_W0;
         end
 
         G_W0: if (cmd_rdy && (gap == 6'd0)) begin
-          cmd    <= 1'b1;
+          cmd    <= 1'b1;               // masked write of A over beat TGT_BEAT
           cmd_en <= 1'b1;
           gap    <= TCMD;
+          wbeat  <= 5'd0;
           phase  <= G_W0W;
         end
-        G_W0W: begin
-          geo_addr <= 21'd24;
+        G_W0W: if (wbeat == 5'd16) begin
+          wmask_on <= 1'b0;
           phase    <= G_RD;
         end
 
+        // Read the burst back and check beat TGT_BEAT: low half must be A,
+        // high half must still be B, which proves the mask hit one beat and
+        // one half of it.
         G_RD: if (cmd_rdy && (gap == 6'd0)) begin
           cmd    <= 1'b0;
           cmd_en <= 1'b1;
           gap    <= TCMD;
+          wbeat  <= 5'd0;
           phase  <= G_RDW;
         end
         G_RDW: if (rd_data_valid) begin
-          geo_128  <= (rd_data == GEO_A);
-          geo_done <= 1'b1;
-          phase    <= P_DONE;
+          if (wbeat == READ_AT) begin
+            geo_128  <= (rd_data[31:0]  == GEO_A[31:0]) &&
+                        (rd_data[63:32] == GEO_B[63:32]);
+            geo_done <= 1'b1;
+            phase    <= P_DONE;
+          end
         end
 
         default: ;                      // P_DONE: stay
