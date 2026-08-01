@@ -241,8 +241,46 @@ the gap and makes them live. `mutants.sh` does not carry a mutant for them, beca
 `MISSED` forever and a test that cannot fail is worse than no test. `k2g_core.sv` says so at the
 declaration.
 
-**2d — still to do.** Shadow prefetch on `PrepareJump` for zero-bubble branches. That is also the
-main lever on the CPI above.
+### 2d — shadow prefetch: attempted, reverted
+
+**Measured first.** A redirect costs exactly 3 cycles — the fetch round trip — which is 60 of
+`fib`'s 407 cycles (14.7%) and 78 of `hello`'s 1013 (7.7%). Eliminating it would take `fib` from
+CPI 2.33 to about 1.98.
+
+**Prime-time prefetch cannot work here.** The ISA's idiom puts `DISP` and `TC` adjacent, so priming
+executes one cycle before performing; a shadow started at the prime issues its first request as the
+branch is already being taken. The target must instead be computed in **D**, where for an immediate
+displacement it is just `isa + imm` and needs no register — two cycles earlier, exactly the round
+trip. Register-target jumps cannot do this and keep the bubble.
+
+**Built, and reverted.** Two symmetric F→D buffers indexed by a `sel` bit, a stream tag on
+in-flight requests, shadow started from decode, adopted only when the address it started from
+equals the `nisa` being performed (so a predicated-away `DISP`, a double prime, or a register
+target all fall through to the old flush path and are never wrong). Cosim was green and **20 of 20
+branches adopted their shadow** — but CPI did not move, because arbitration gave decode's own
+stream priority and it always had credit, so the shadow never won a bus slot and was always empty
+when adopted.
+
+Giving the shadow priority made it fetch, and broke the machine: `hello` printed `HHHH…` forever,
+`fib` faulted `ADDR_OUT_OF_RANGE` at `0xfffffff0`. Two real bugs were found and fixed on the way
+and are worth having written down:
+
+- **Same-cycle adopt and retarget.** Adoption swaps `sel`, so a shadow started by decode in that
+  same cycle retargets `fpc` of the very buffer being adopted — contents right, continuation
+  address wrong.
+- **Credit underflow on dropped answers.** `fdrop` is only ever set alongside `finfl <= 0`, so
+  decrementing `finfl` again when a dropped answer arrives underflows it to 7, fails
+  `finfl < DEPTH` forever and silently kills that stream. Invisible while the shadow never had
+  requests outstanding — which is precisely what the original arbitration guaranteed.
+
+A third defect remains unisolated, which is why this is reverted rather than committed. Shipping
+the working arbitration would have meant ~200 flops of provably dead logic; shipping the effective
+one would have meant a broken machine.
+
+**Worth retrying, and the value grows.** Behind an I-cache a redirect costs 3 cycles *plus* the
+miss penalty, so the same mechanism is worth considerably more after Phase 3 than before it — and
+building it against the cache's real latency avoids sizing it twice. Start from the notes above
+rather than from scratch.
 
 | Stage | Work |
 |---|---|
