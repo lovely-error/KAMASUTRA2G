@@ -141,6 +141,23 @@ package k2g_types;
     return u;
   endfunction
 
+  // ---- Memory bus --------------------------------------------------------
+  //
+  // The contract between the core and whatever answers a memory access: today
+  // `k2g_mem` directly, in v2 an instruction cache, a data cache, and PSRAM
+  // behind them.
+  //
+  // A request carries per-byte write enables rather than a width code. The
+  // tag-driven store width (spec 5.3) already resolves to lanes in the core,
+  // and the memory is byte-striped for exactly that reason (see k2g_mem.sv),
+  // so a width code would only be decoded back into the lanes it came from.
+  // `we == 0` is a read.
+  typedef struct packed {
+    logic [31:0] addr;
+    logic [3:0]  we;
+    logic [31:0] wdata;
+  } mem_req_t;
+
   // ---- Retirement --------------------------------------------------------
   //
   // What the core promises about a finished instruction, and the one part of

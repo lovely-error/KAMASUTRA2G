@@ -59,6 +59,12 @@ for f in "$RTL"/board/k2g_*.sv; do
         *) ;;
     esac
 done
+# Simulation-only models (k2g_mem_slow) live in tb/ rather than rtl/ so the
+# board build's `k2g_*.sv` glob cannot reach them. They must be compiled
+# before the testbenches that instantiate them.
+for f in "$RTL"/tb/k2g_*.sv; do
+    [ -e "$f" ] && SOURCES+=("$f")
+done
 for f in "$RTL"/tb/tb_*.sv; do
     [ -e "$f" ] && SOURCES+=("$f")
 done

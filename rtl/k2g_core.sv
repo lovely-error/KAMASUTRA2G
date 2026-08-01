@@ -30,12 +30,10 @@ module k2g_core
     output logic        imem_en,
     input  logic [15:0] imem_data,
 
-    // Data port.
-    output logic [31:0] dmem_addr,
-    output logic        dmem_en,
-    output logic [3:0]  dmem_we,
-    output logic [31:0] dmem_wdata,
-    input  logic [31:0] dmem_rdata,
+    // Data port. A channel rather than a fixed one-cycle access: what answers
+    // it is BSRAM today and a write-back data cache over PSRAM later, and the
+    // core must not care which.
+    k2g_membus.master   dbus,
 
     // UART, through the CSP port space.
     output logic        uart_tx_valid,
@@ -69,6 +67,10 @@ module k2g_core
   logic        redirect;
   logic [31:0] redirect_pc;
   logic        stall;
+
+  // Declared here rather than with the rest of the sequential state because
+  // the data bus request below has to know the machine is stopped.
+  logic        halted_r, faulted_r;
 
   assign imem_addr = pc;
   assign imem_en   = !stall;
@@ -280,16 +282,40 @@ module k2g_core
   wire logic start_mulw = take_uop && cond_met && (uop.kind == UOP_ARITH) &&
                           (uop.arith_op == ARITH_MUL) && uop.uto_valid;
 
-  // A CSP access that cannot complete holds the instruction instead of
-  // retiring it. Because nothing commits, the architectural state after each
-  // retired instruction is unchanged -- the cosimulation cannot see a stall.
-  assign stall = mem_pending || mulw_pending || csp_stall;
+  // ---- data bus request --------------------------------------------------
+  // `req_valid` is deliberately NOT qualified by `!stall`, and this is the
+  // one place in the core where that matters. `stall` includes "my request
+  // has not been accepted", so a `req_valid` that consulted the stall would
+  // consult `req_ready` through it -- the rule 3 violation in k2g_chan.sv,
+  // and the same shape as the loop the decoder's `hold` input exists to
+  // avoid. What the request depends on is the decoded instruction and
+  // nothing else.
+  //
+  // `mem_pending` gates it because this master keeps at most one request
+  // outstanding, which is what lets the bus have no response backpressure
+  // (see k2g_membus.sv).
+  wire logic mem_access = uop_valid && cond_met && (is_load || is_store) &&
+                          !misaligned && !out_of_range && !halted_r &&
+                          !mem_pending && !mulw_pending;
 
-  assign dmem_addr  = access_addr;
-  assign dmem_en    = take_uop && cond_met && (is_load || is_store) &&
-                      !misaligned && !out_of_range;
-  assign dmem_we    = is_store ? store_we : 4'b0000;
-  assign dmem_wdata = store_data;
+  assign dbus.req_valid = mem_access;
+  assign dbus.req.addr  = access_addr;
+  assign dbus.req.we    = is_store ? store_we : 4'b0000;
+  assign dbus.req.wdata = store_data;
+
+  // A CSP access that cannot complete holds the instruction instead of
+  // retiring it, and so does a memory access the bus has not accepted or not
+  // answered. Because nothing commits, the architectural state after each
+  // retired instruction is unchanged -- the cosimulation cannot see a stall,
+  // which is what makes variable-latency memory invisible to it.
+  //
+  // `mem_pending` covers the whole wait INCLUDING the cycle the response
+  // arrives, not just the cycles before it. The response cycle is when the
+  // load writes back, and the value array has exactly one write port
+  // (k2g_regfile.sv) -- letting the next instruction retire alongside would
+  // put two writes on it.
+  assign stall = mem_pending || mulw_pending || csp_stall ||
+                 (mem_access && !dbus.req_ready);
 
   // ---- jump latch --------------------------------------------------------
   logic [31:0] nisa;
@@ -353,8 +379,9 @@ module k2g_core
   logic [31:0] wb_value;
   logic [2:0]  wb_tag;
 
-  // Loads return in the cycle after the access; everything else is immediate.
-  wire logic [31:0] load_shifted = dmem_rdata >> {pend_addr_lo, 3'b000};
+  // A load returns whenever the bus answers; everything else is immediate.
+  wire logic        load_done    = mem_pending && dbus.rsp_valid;
+  wire logic [31:0] load_shifted = dbus.rsp_data >> {pend_addr_lo, 3'b000};
   wire logic [31:0] load_value   = rdt_normalize(load_shifted, pend_tag);
 
   always_comb begin
@@ -370,8 +397,8 @@ module k2g_core
     wb_value    = 32'd0;
     wb_tag      = RDT_U32;
 
-    if (mem_pending) begin
-      // Second cycle of a load.
+    if (load_done) begin
+      // The cycle the bus answers a load.
       w_addr   = pend_dst;
       w_value  = load_value;
       w_tag    = pend_tag;
@@ -525,7 +552,7 @@ module k2g_core
   // mutually exclusive, because both pending flags assert `stall` and
   // `take_uop` requires `!stall`.
   wire logic retire_now = (take_uop && !start_load && !start_mulw) ||
-                          mem_pending || mulw_pending;
+                          load_done || mulw_pending;
 
   // Captured at `take_uop`, not at retirement. `isa` is valid only in the
   // cycle the instruction is taken: during a second cycle the front end has
@@ -570,8 +597,6 @@ module k2g_core
   end
 
   // ---- sequential state --------------------------------------------------
-  logic halted_r, faulted_r;
-
   assign halted        = halted_r;
   assign faulted       = faulted_r;
   assign fault_cause_o = fault_cause;
@@ -610,8 +635,10 @@ module k2g_core
         cp_valid <= 1'b1;
       end
 
-      // Second cycles complete here.
-      mem_pending  <= 1'b0;
+      // Second cycles complete here. A load's does not: `mem_pending` is
+      // cleared by the bus answering, however many cycles that takes, rather
+      // than unconditionally on the next edge.
+      if (load_done) mem_pending <= 1'b0;
       mulw_pending <= 1'b0;
 
       if (start_load) begin

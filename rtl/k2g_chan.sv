@@ -62,11 +62,18 @@ endinterface
 // `ready` on a stall loses the item already in flight; the second entry is
 // where that item skids to. One entry costs half the throughput instead, and
 // the fetch path cannot afford that.
+// `flush` empties the buffer at the next edge, for a branch redirect throwing
+// away code points fetched down the wrong path. It does not reach upstream:
+// requests already accepted by a slow memory will still answer, and dropping
+// those is the fetch unit's job, not the buffer's. Getting that division wrong
+// leaves a stale response arriving after the flush and being decoded as part
+// of the new instruction stream.
 module k2g_skid #(
     parameter int WIDTH = 32
 ) (
     input logic  clk,
     input logic  rst_n,
+    input logic  flush,
     k2g_chan.dst up,
     k2g_chan.src down
 );
@@ -89,6 +96,9 @@ module k2g_skid #(
       skid_full <= 1'b0;
       out_data  <= '0;
       skid_data <= '0;
+    end else if (flush) begin
+      out_valid <= 1'b0;
+      skid_full <= 1'b0;
     end else begin
       // Output register: take from upstream when there is room for it now,
       // otherwise from the skid entry, otherwise empty out.
@@ -125,7 +135,7 @@ module k2g_skid #(
       held_valid <= 1'b0;
       held_data  <= '0;
     end else begin
-      held_valid <= up.valid && !up_xfer;
+      held_valid <= up.valid && !up_xfer && !flush;
       held_data  <= up.data;
       if (held_valid) begin
         assert (up.valid)

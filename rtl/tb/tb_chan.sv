@@ -23,9 +23,12 @@ module tb_chan;
   k2g_chan #(.WIDTH(WIDTH)) up ();
   k2g_chan #(.WIDTH(WIDTH)) down ();
 
+  bit flush = 0;
+
   k2g_skid #(.WIDTH(WIDTH)) dut (
       .clk  (clk),
       .rst_n(rst_n),
+      .flush(flush),
       .up   (up),
       .down (down)
   );
@@ -46,8 +49,10 @@ module tb_chan;
 
   // The producer's offer is a function of its own pattern only. It must not
   // consult `down.ready`, or the test would satisfy rule 3 by accident.
+  bit block_recv = 0;
+
   wire logic want_send = open || (lfsr_a[3:0] != 4'd0);
-  wire logic want_recv = open || (lfsr_b[2:0] != 3'd0);
+  wire logic want_recv = !block_recv && (open || (lfsr_b[2:0] != 3'd0));
 
   // Rule 2: an offer, once made, stands until it is taken. The stall pattern
   // therefore gets to decide whether to START offering, never to retract.
@@ -77,6 +82,7 @@ module tb_chan;
 
   int checks = 0;
   int errors = 0;
+  bit checking = 1;
 
   always @(posedge clk) begin
     if (!rst_n) begin
@@ -87,7 +93,9 @@ module tb_chan;
 
       if (down.valid && down.ready) begin
         checks <= checks + 1;
-        if (down.data !== WIDTH'(recv_next)) begin
+        // A flush deliberately drops items, so the ordering check is turned
+        // off around it rather than taught to expect a gap it cannot predict.
+        if (checking && down.data !== WIDTH'(recv_next)) begin
           $display("TB_FAIL tb_chan: expected item %0d, got %0d",
                    recv_next, down.data);
           errors <= errors + 1;
@@ -164,8 +172,50 @@ module tb_chan;
     moved = recv_next - base;
     open  = 0;
 
-    total_checks = checks + r3_checks + 2;
-    total_errors = errors + r3_errors;
+    // ---- flush -----------------------------------------------------------
+    // Fill both entries, flush, and confirm the buffer is empty and usable
+    // again. Ordering checking is off across this: a flush drops items by
+    // design, and the gap it leaves is not predictable from here.
+    checking   = 0;
+    block_recv = 1;
+    repeat (6) @(posedge clk);
+    @(negedge clk);
+
+    total_checks = 1;
+    total_errors = 0;
+    if (!down.valid || up.ready) begin
+      $display("TB_FAIL tb_chan: buffer did not fill (down.valid=%0b up.ready=%0b)",
+               down.valid, up.ready);
+      total_errors++;
+    end
+
+    flush = 1;
+    @(posedge clk);
+    @(negedge clk);
+    flush = 0;
+
+    total_checks++;
+    if (down.valid) begin
+      $display("TB_FAIL tb_chan: flush left an item in the output register");
+      total_errors++;
+    end
+    total_checks++;
+    if (!up.ready) begin
+      $display("TB_FAIL tb_chan: flush did not free the skid entry");
+      total_errors++;
+    end
+
+    block_recv = 0;
+    base = recv_next;
+    repeat (20) @(posedge clk);
+    total_checks++;
+    if (recv_next == base) begin
+      $display("TB_FAIL tb_chan: nothing transferred after a flush");
+      total_errors++;
+    end
+
+    total_checks = total_checks + checks + r3_checks + 2;
+    total_errors = total_errors + errors + r3_errors;
 
     if (moved < 98) begin
       $display("TB_FAIL tb_chan: %0d items in 100 unobstructed cycles, want >= 98",

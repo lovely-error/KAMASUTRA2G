@@ -30,6 +30,18 @@ SEEDS="${1:-20}"
 ONE_IMAGE="${2:-}"
 COUNT="${COUNT:-250}"
 
+# Extra data-memory latency, drawn per access from [0, LATENCY]. Zero
+# reproduces the fixed one-cycle BSRAM port exactly.
+#
+# This is not decoration. A memory that always answers in one cycle cannot
+# distinguish a core that tolerates variable latency from one that happens to
+# work at one cycle -- and Phase 3 puts caches behind this bus, where a miss
+# costs tens of cycles. A stall is architecturally invisible by construction
+# (nothing commits during one), so every latency setting must produce byte-for
+# -byte identical results. If one does not, the core is reading something it
+# does not own.
+LATENCY="${LATENCY:-0}"
+
 [ -x "$QUESTA/vsim.exe" ] || { echo "questa not found at $QUESTA" >&2; exit 1; }
 
 # The emulator is loaded as a DPI-C shared object, so it must be built first.
@@ -48,6 +60,8 @@ SOURCES=("$RTL/k2g_pkg.sv" "$RTL/k2g_types.svh")
 for f in "$RTL"/k2g_*.sv; do
     [ "$(basename "$f")" = "k2g_pkg.sv" ] || SOURCES+=("$f")
 done
+# Simulation-only models first; they are instantiated by the testbenches.
+SOURCES+=("$RTL"/tb/k2g_*.sv)
 SOURCES+=("$RTL"/tb/tb_*.sv)
 
 if ! "$QUESTA/vlog.exe" -sv -quiet +define+SIMULATION "+incdir+$RTL_WIN" "${SOURCES[@]}" > vlog.log 2>&1 \
@@ -62,7 +76,7 @@ run_one() {
     local log="$WORK/cosim_${label}.log"
     "$QUESTA/vsim.exe" -c -quiet -sv_lib "$DPI" \
         -do "onerror {quit -code 1}; run -all; quit -f" \
-        "+image=$img" tb_cosim > "$log" 2>&1
+        "+image=$img" "+latency=$LATENCY" tb_cosim > "$log" 2>&1
     if grep -q TB_PASS "$log"; then
         local n c
         n=$(grep -oE 'retired=[0-9]+' "$log" | tail -1 | cut -d= -f2)
@@ -109,7 +123,7 @@ done
 
 echo
 if [ $fail -eq 0 ]; then
-    echo "COSIM PASS -- $total_checks architectural state comparisons, no divergence"
+    echo "COSIM PASS -- $total_checks architectural state comparisons, no divergence (latency 0..$LATENCY)"
 else
     echo "COSIM FAIL"
 fi

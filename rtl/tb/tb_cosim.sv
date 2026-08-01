@@ -58,6 +58,10 @@ module tb_cosim
   logic [31:0] dmem_rdata;
   logic        imem_en, dmem_en;
   logic [3:0]  dmem_we;
+
+  // Extra data-side latency, from +latency=N. Defaults to 0 so the normal run
+  // reproduces the fixed one-cycle port exactly; cosim.sh sweeps it.
+  int unsigned latency = 0;
   logic        uart_tx_valid, uart_rx_take;
   logic [7:0]  uart_tx_data;
   logic        uart_tx_ready;
@@ -70,7 +74,21 @@ module tb_cosim
   logic        retire_valid;
   retire_t     retire;
 
+  k2g_membus dbus ();
+
   k2g_core #(.MEM_BYTES(MEM_BYTES)) dut (.*);
+
+  k2g_mem_slow u_slow (
+      .clk        (clk),
+      .rst_n      (rst_n),
+      .max_latency(latency),
+      .bus        (dbus),
+      .b_addr     (dmem_addr),
+      .b_en       (dmem_en),
+      .b_we       (dmem_we),
+      .b_wdata    (dmem_wdata),
+      .b_rdata    (dmem_rdata)
+  );
 
   k2g_mem #(.BYTES(MEM_BYTES)) mem (
       .clk(clk), .a_addr(imem_addr), .a_en(imem_en), .a_data(imem_data),
@@ -207,6 +225,7 @@ module tb_cosim
       $finish;
     end
     void'($value$plusargs("max=%d", max_insns));
+    void'($value$plusargs("latency=%d", latency));
     forever_ok = $test$plusargs("forever");
 
     load_both(image_path);

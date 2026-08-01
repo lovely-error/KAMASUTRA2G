@@ -129,6 +129,22 @@ module k2g_soc
   logic        imem_en, dmem_en, core_dmem_en;
   logic [3:0]  dmem_we, core_dmem_we;
 
+  // The core reaches the memory through the bus contract, not directly. The
+  // bridge is the degenerate slave -- always ready, answers next cycle -- and
+  // is what a cache replaces in Phase 3 without the core noticing.
+  k2g_membus dbus ();
+
+  k2g_bsram_port u_dport (
+      .clk    (clk_sys),
+      .rst_n  (cpu_rst_n),
+      .bus    (dbus),
+      .b_addr (core_dmem_addr),
+      .b_en   (core_dmem_en),
+      .b_we   (core_dmem_we),
+      .b_wdata(core_dmem_wdata),
+      .b_rdata(dmem_rdata)
+  );
+
   // During boot the copier owns the data port; afterwards the core does.
   // One byte per cycle, placed by the memory's own byte-lane enables.
   assign dmem_addr  = booting ? {16'd0, boot_ix} : core_dmem_addr;
@@ -167,11 +183,7 @@ module k2g_soc
       .imem_addr    (imem_addr),
       .imem_en      (imem_en),
       .imem_data    (imem_data),
-      .dmem_addr    (core_dmem_addr),
-      .dmem_en      (core_dmem_en),
-      .dmem_we      (core_dmem_we),
-      .dmem_wdata   (core_dmem_wdata),
-      .dmem_rdata   (dmem_rdata),
+      .dbus         (dbus),
       .uart_tx_valid(core_tx_valid),
       .uart_tx_data (core_tx_data),
       .uart_tx_ready(tx_ready),

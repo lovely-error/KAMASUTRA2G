@@ -34,7 +34,23 @@ module tb_core
   logic        retire_valid;
   retire_t     retire;
 
+  int unsigned latency = 0;
+
+  k2g_membus dbus ();
+
   k2g_core #(.MEM_BYTES(MEM_BYTES)) dut (.*);
+
+  k2g_mem_slow u_slow (
+      .clk        (clk),
+      .rst_n      (rst_n),
+      .max_latency(latency),
+      .bus        (dbus),
+      .b_addr     (dmem_addr),
+      .b_en       (dmem_en),
+      .b_we       (dmem_we),
+      .b_wdata    (dmem_wdata),
+      .b_rdata    (dmem_rdata)
+  );
 
   k2g_mem #(.BYTES(MEM_BYTES)) mem (
       .clk    (clk),

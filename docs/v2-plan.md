@@ -68,10 +68,20 @@ Measured cost: SoC 4695 → 4670 LUTs, 758 → 772 registers. Free.
 
 ---
 
-## Phase 1 — the channel primitive and the memory contract
+## Phase 1 — the channel primitive and the memory contract 🔶 data side done
 
 **Goal:** every interface that will later have variable latency has it now, before anything real
 is variable.
+
+**Done:** `rtl/k2g_chan.sv` (channel interface + `k2g_skid`, with `tb_chan`), `rtl/k2g_membus.sv`,
+`rtl/k2g_bsram_port.sv` (synthesizable slave) and `rtl/tb/k2g_mem_slow.sv` (the latency injector).
+The core's **data** port is now a `k2g_membus` master. `LATENCY=40 bash rtl/sim/cosim.sh` produces
+results identical to `LATENCY=0`, across all 22 programs.
+
+**Still to do:** the **instruction** port still assumes a fixed one-cycle answer. Converting it
+needs credit-based issue and an elastic F→D buffer — otherwise one-outstanding-request fetch halves
+throughput — and that is a rewrite of the fetch unit, which is Phase 2's first job. It is done
+there rather than twice.
 
 - **`rtl/k2g_chan.svh`** — `docs/gowin-sv-support.md` measured `interface` + `modport` as PASS
   (probe 04) and `struct packed` as PASS (02, 08), so `docs/attic/pipe.sv`'s handshake shape is
