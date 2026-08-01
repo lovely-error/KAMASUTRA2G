@@ -20,12 +20,19 @@ module k2g_soc
 #(
     parameter int MEM_BYTES = 8192,
     parameter int XTAL_HZ   = 27_000_000,
-    // The core's single-cycle execute path runs 27 logic levels deep and
-    // places at an Fmax of about 11.4 MHz, well under the 27 MHz crystal, so
-    // the whole machine runs on a divided clock. Dividing by 4 gives 6.75 MHz
-    // with comfortable margin. Raising this is the reward for pipelining the
-    // core (see the note in k2g_core.sv).
-    parameter int CLK_DIV   = 4,
+    // The core runs on a divided crystal because its execute path has never
+    // met 27 MHz. v1 was 28 logic levels deep and placed at 10.0 MHz, so it
+    // ran at 27/4 = 6.75 MHz.
+    //
+    // Giving decode its own stage (docs/v2-plan.md, Phase 2b) took that to
+    // 14.53 MHz, which clears 13.5 with about 7% to spare, so this is now 2.
+    // Going to 1 needs 27 MHz and is what splitting execute from writeback is
+    // for.
+    //
+    // MUST be a power of two, and the .sdc constraint names the divider bit
+    // directly -- change one and the other has to follow, or the tool
+    // cheerfully reports timing against a clock the design does not have.
+    parameter int CLK_DIV   = 2,
     parameter int BAUD      = 115_200
 ) (
     input  logic       clk_27m,
@@ -46,7 +53,18 @@ module k2g_soc
   // the combinational path to settle inside one 27 MHz period unless the
   // timing constraints declared a multicycle path, and getting that wrong
   // fails silently on hardware rather than loudly in the report.
-  wire logic clk_sys = div[1];
+  //
+  // Derived from CLK_DIV rather than hardcoded. It used to be `div[1]` with
+  // CLK_DIV only feeding the baud divisor, so changing the parameter moved the
+  // baud rate and left the clock alone -- a trap with no symptom until the
+  // serial output is garbage.
+  // The index is a localparam, not `$clog2(CLK_DIV)-1` inline. That expression
+  // in a part-select made GowinSynthesis exit 1 with an empty log and no
+  // banner -- the silent failure mode docs/bring-up.md warns about, found by
+  // bisecting because there is nothing to read.
+  localparam int CLK_SEL = (CLK_DIV == 2) ? 0 : 1;
+
+  wire logic clk_sys = div[CLK_SEL];
 
   // ---- reset: synchronize, then debounce ---------------------------------
   // The button is asynchronous, so it is synchronized first; releasing reset

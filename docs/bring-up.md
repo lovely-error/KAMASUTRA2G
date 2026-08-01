@@ -98,23 +98,28 @@ So `1` followed by `00110` is cause 0x06, `MISALIGNED_LOAD`.
 ## Timing
 
 The design does **not** meet timing at the board's 27 MHz crystal, so the core
-runs on a divide-by-4 at **6.75 MHz**.
+runs on a divided clock. It is now a divide-by-**2** at **13.5 MHz**.
 
-| Clock | Constraint | Actual Fmax | Logic levels |
+| | Constraint | Actual Fmax | Logic levels |
 |---|---|---|---|
-| `clk_27m` | 27.0 MHz | 448.6 MHz | 2 |
-| `clk_sys` | 6.75 MHz | 10.0 MHz | 28 |
+| v1, single-cycle execute | 6.75 MHz | 10.0 MHz | 28 |
+| after Phase 2b, decode split out | **13.5 MHz** | **16.3 MHz** | **13** |
 
-Zero negative slack on both.
+Zero negative slack. About 21% margin.
 
-The 29-level path is the single-cycle execute chain: fetch → decode → register
-read → ALU → writeback, all combinational within one cycle. That is the direct
-cost of the simplification recorded in `k2g_core.sv` — the plan's 3-stage
-F/D/X pipeline exists precisely to break this path. Pipelining is the reward
-for the lockstep cosimulation being green: it makes the change safe to attempt.
+v1's 28-level path was the whole single-cycle execute chain — fetch → decode →
+register read → ALU → writeback, all combinational within one cycle. Giving
+decode its own stage (`docs/v2-plan.md`, Phase 2b) roughly halved it and took
+Fmax past the 13.5 MHz that a divide-by-2 needs. Going to divide-by-1 needs
+27 MHz and is what splitting execute from writeback is for.
 
-Raising `CLK_DIV` to 2 would need an Fmax above 13.5 MHz; the current design is
-about 2 MHz short.
+**`CLK_DIV` and the `.sdc` must move together.** The constraint names the
+divider bit directly — `div[0]` is divide-by-2, `div[1]` divide-by-4 — because
+`clk_sys` does not survive synthesis as a net name. Constraining the wrong bit
+is not an error; it reports timing against a clock the design does not have.
+
+The baud divisor follows `CLK_DIV` automatically, and got better on the way:
+13.5 MHz / 117 is 115385 baud, 0.16% off, against 1.02% before.
 
 ## Terminal conventions
 
@@ -191,5 +196,7 @@ I/O standards at the bank defaults. The LEDs still light: they sit between the
 
 **Silent crashes are common.** Several constructs make `gw_sh` exit 1 with zero
 output — not even its startup banner. One was two 22-bit down-counters in a
-module that synthesized fine with either counter alone. When a build fails with
-no message, bisect the source; there will be no diagnostic to read.
+module that synthesized fine with either counter alone. Another was
+`div[$clog2(CLK_DIV)-1]`: `$clog2` inline in a part-select index, which is fine
+in Questa and fine as a `localparam` assigned first. When a build fails with no
+message, bisect the source; there will be no diagnostic to read.
