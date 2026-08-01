@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use crate::interp::{
-	AluSrc, CanonInsn, CmpSrc, ComparisonKind, ConditionCode, DataKind, JumpTarget, LogicOp,
-	ShiftOp, ShiftSrc, UnaryOp, decode_instruction,
+	AluSrc, CanonInsn, CmpSrc, ComparisonKind, Conditional, ConditionCode, DataKind, JumpTarget,
+	LogicOp, ShiftOp, ShiftSrc, UnaryOp, decode_instruction,
 };
 
 fn tag_name(k: DataKind) -> &'static str {
@@ -57,10 +57,16 @@ fn shift_src(s: ShiftSrc) -> String {
 
 /// Renders one decoded instruction. `isa` is needed to resolve relative
 /// branch targets, and `labels` to name them when possible.
+///
+/// `cond` is the instruction's predicate, rendered as the trailing `if` clause.
+/// It lives here rather than at the call site so that every caller gets it --
+/// when it was appended by `disassemble` alone, anything else formatting an
+/// instruction silently dropped the predicate.
 pub fn format_insn(
 	insn: &CanonInsn,
 	isa: u32,
 	labels: &HashMap<String, u32>,
+	cond: Option<Conditional>,
 ) -> String {
 	let name_at = |addr: u32| -> String {
 		labels
@@ -70,7 +76,7 @@ pub fn format_insn(
 			.unwrap_or_else(|| format!("{addr:#x}"))
 	};
 
-	match insn {
+	let text = match insn {
 		CanonInsn::PutImmidiate { dst_reg, imm, datakind } => {
 			let w = match datakind {
 				DataKind::U8 => "puc8",
@@ -122,8 +128,8 @@ pub fn format_insn(
 				LogicOp::Or => "or",
 				LogicOp::Xor => "xor",
 			};
-			let p = if *on_flags { "flag: " } else { "" };
-			format!("{p}{m} r{dst}, {}", alu_src(*src2))
+			let p = if *on_flags { ".flag" } else { "" };
+			format!("{m}{p} r{dst}, {}", alu_src(*src2))
 		}
 		CanonInsn::BitShift { op, dst, src2 } => {
 			let m = match op {
@@ -151,21 +157,26 @@ pub fn format_insn(
 			format!("{m} r{lhs}, {}", cmp_src(*rhs))
 		}
 		CanonInsn::PrepareJump { target, link_reg } => {
-			let link = link_reg.map(|r| format!("uto r{r}: ")).unwrap_or_default();
+			// The link register is a leading operand on the `l` forms, which is
+			// how a call is spelled.
+			let l = if link_reg.is_some() { "l" } else { "" };
+			let link = link_reg.map(|r| format!("r{r}, ")).unwrap_or_default();
 			match target {
 				JumpTarget::RelImm(d) => {
 					let t = isa.wrapping_add(*d as u32);
-					format!("{link}dispi {}", name_at(t))
+					format!("dispi{l} {link}{}", name_at(t))
 				}
-				JumpTarget::RelReg(r) => format!("{link}disp r{r}"),
-				JumpTarget::AbsReg(r) => format!("{link}dispa r{r}"),
+				JumpTarget::RelReg(r) => format!("disp{l} {link}r{r}"),
+				JumpTarget::AbsReg(r) => format!("dispa{l} {link}r{r}"),
 			}
 		}
 		CanonInsn::Unary { op, target, on_flags } => {
-			let p = if *on_flags { "flag: " } else { "" };
+			let p = if *on_flags { ".flag" } else { "" };
 			match op {
-				UnaryOp::BitwiseNot => format!("{p}not r{target}"),
-				UnaryOp::AdditiveInverse => format!("{p}neg r{target}"),
+				UnaryOp::BitwiseNot => format!("not{p} r{target}"),
+				// `neg.flag` is ILLEGAL_PREFIX_COMBO and kasm refuses it, but
+				// the disassembler reports what the bits say regardless.
+				UnaryOp::AdditiveInverse => format!("neg{p} r{target}"),
 			}
 		}
 		CanonInsn::Prefetch { on_instructions, r1, r2 } => {
@@ -177,6 +188,16 @@ pub fn format_insn(
 		CanonInsn::Halt => "halt".to_string(),
 		CanonInsn::Nop => "nop".to_string(),
 		CanonInsn::PerformJump => "tc".to_string(),
+	};
+
+	match cond {
+		Some(c) => format!(
+			"{text} if {}r{}.{}",
+			if c.is_inverted { "!" } else { "" },
+			c.rix,
+			cc_name(c.cc)
+		),
+		None => text,
 	}
 }
 
@@ -211,21 +232,10 @@ pub fn disassemble(
 					.chunks(2)
 					.map(|c| u16::from_le_bytes([c[0], *c.get(1).unwrap_or(&0)]))
 					.collect();
-				let cond = d
-					.cond
-					.map(|c| {
-						format!(
-							"{} r{}, {}: ",
-							if c.is_inverted { "xcn" } else { "xcp" },
-							c.rix,
-							cc_name(c.cc)
-						)
-					})
-					.unwrap_or_default();
 				out.push(Line {
 					addr,
 					words,
-					text: format!("{cond}{}", format_insn(&d.insn, addr, labels)),
+					text: format_insn(&d.insn, addr, labels, d.cond),
 				});
 				addr += size as u32;
 			}

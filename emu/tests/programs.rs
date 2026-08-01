@@ -62,14 +62,14 @@ fn run_file(name: &str) -> (String, StopReason, Vec<u32>) {
 fn hello_prints_over_the_uart() {
 	let (out, stop, _) = run_file("hello.kasm");
 	assert_eq!(stop, StopReason::Halted, "hello.kasm must halt cleanly");
-	assert_eq!(out, "Hello from KAMASUTRA2G!\n");
+	assert_eq!(out, "Hello from KAMASUTRA2G!\r\n");
 }
 
 #[test]
 fn fib_prints_55() {
 	let (out, stop, regs) = run_file("fib.kasm");
 	assert_eq!(stop, StopReason::Halted);
-	assert_eq!(out, "55\n");
+	assert_eq!(out, "55\r\n");
 	// r2 holds fib(11) once the loop has run its course.
 	assert_eq!(regs[2], 89);
 }
@@ -170,17 +170,56 @@ fn data_directives_emit_the_right_bytes() {
 }
 
 #[test]
-fn prefix_syntax_assembles() {
+fn if_clause_assembles() {
 	let src = "
         puc32   r1, 0
-        xcp     r1, zero: puc32 r2, 5
-        xcn     r1, zero: puc32 r3, 6
+        puc32   r2, 5           if r1.zero
+        puc32   r3, 6           if !r1.zero
         halt
 ";
 	let (_, stop, regs) = run_source(src, b"");
 	assert_eq!(stop, StopReason::Halted);
 	assert_eq!(regs[2], 5, "the taken predicate must execute");
 	assert_eq!(regs[3], 0, "the untaken predicate must not");
+}
+
+/// The clause is whitespace-delimited but operands are comma-delimited, so on a
+/// memory operand the keyword lands inside what would otherwise be one operand.
+#[test]
+fn if_clause_survives_bracketed_operands() {
+	let src = "
+        puc32   r1, 0
+        puc32   r5, 0x40
+        puc32   r7, 0xab
+        st      [r5], r7        if r1.zero
+        ld32    r8, [r5]        if r1.zero
+        halt
+";
+	let (_, stop, regs) = run_source(src, b"");
+	assert_eq!(stop, StopReason::Halted);
+	assert_eq!(regs[8], 0xab, "both predicated memory ops must execute");
+}
+
+/// `.flag` writes flag bits and `if rN.flag` reads them; the two spellings sit
+/// in different grammatical slots and must not interfere.
+#[test]
+fn flag_suffix_and_flag_condition_coexist() {
+	// `.flag` combines flag bits, not values, so both operands need a
+	// comparison to set theirs first.
+	let src = "
+        puc32   r1, 1
+        puc32   r2, 2
+        puc32   r4, 5
+        lt      r1, r4          ; 1 < 5, sets r1's flag
+        lt      r2, r4          ; 2 < 5, sets r2's flag
+        and.flag r1, r2
+        puc32   r3, 0
+        puc32   r3, 7           if r1.flag
+        halt
+";
+	let (_, stop, regs) = run_source(src, b"");
+	assert_eq!(stop, StopReason::Halted);
+	assert_eq!(regs[3], 7, "both flags set, so their AND must be set");
 }
 
 #[test]
@@ -193,7 +232,7 @@ fn signed_comparison_via_rdt() {
         puc32   r2, 1
         lt      r1, r2
         puc32   r3, 0
-        xcp     r1, flag: puc32 r3, 1
+        puc32   r3, 1           if r1.flag
         halt
 ";
 	let (_, stop, regs) = run_source(src, b"");
@@ -231,6 +270,46 @@ fn bad_operand_count_is_reported() {
 	assert!(errors[0].message.contains("operand"), "got: {}", errors[0].message);
 }
 
+#[test]
+fn if_is_reserved_and_cannot_name_a_label() {
+	for src in ["if:\n        halt\n", "if = 4\n        halt\n"] {
+		let errors = assemble(src).unwrap_err();
+		assert!(errors[0].message.contains("reserved"), "got: {}", errors[0].message);
+	}
+}
+
+#[test]
+fn malformed_if_clauses_are_reported() {
+	for (src, want) in [
+		("        halt if\n", "needs a condition"),
+		("        halt if r4\n", "register and a flag"),
+		("        halt if r4.bogus\n", "bogus"),
+		("        halt if r99.zero\n", "r99"),
+		("        puc32 r1, 0 if r1.zero if r2.zero\n", "only one"),
+	] {
+		let errors = assemble(src).unwrap_err();
+		assert!(
+			errors[0].message.contains(want),
+			"`{src}` should mention `{want}`, got: {}",
+			errors[0].message
+		);
+	}
+}
+
+/// The old prefix form silently dropped `flag:` wherever the encoder ignored
+/// it, so a typo'd modifier assembled to something that did nothing.
+#[test]
+fn flag_suffix_on_an_unsupported_mnemonic_is_reported() {
+	let errors = assemble("        add.flag r1, r2\n").unwrap_err();
+	assert!(errors[0].message.contains(".flag"), "got: {}", errors[0].message);
+}
+
+#[test]
+fn unknown_mnemonic_suffix_is_reported() {
+	let errors = assemble("        add.wat r1, r2\n").unwrap_err();
+	assert!(errors[0].message.contains(".wat"), "got: {}", errors[0].message);
+}
+
 // -------------------------------------------------------------------------
 // Assembler / disassembler agreement
 // -------------------------------------------------------------------------
@@ -249,7 +328,16 @@ start:
         shl     r2, 4
         bext    r4, r2, 4, 8
         tst     r1, r2
+        and.flag r1, r2
         dispi   start
+        tc
+        dispi   start           if r4.ov
+        tc
+        dispi   start           if !r3.z
+        tc
+        dispil  r30, start
+        tc
+        dispal  r30, r5
         tc
         halt
 ";
@@ -264,10 +352,53 @@ start:
 		"shl r2, 4",
 		"bext r4, r2, 4, 8",
 		"tst r1, r2",
+		"and.flag r1, r2",
 		"dispi start",
+		"dispi start if r4.overflow",
+		"dispi start if !r3.zero",
+		"dispil r30, start",
+		"dispal r30, r5",
 		"tc",
 		"halt",
 	] {
 		assert!(text.contains(expect), "disassembly missing `{expect}`:\n{text}");
 	}
+	for gone in ["xcp ", "xcn ", "uto ", "flag: "] {
+		assert!(!text.contains(gone), "old prefix form `{gone}` survived:\n{text}");
+	}
+}
+
+/// Closes the loop: whatever `kdis` prints must feed straight back into `kasm`
+/// and produce the same bytes. This is what stops the two spellings drifting.
+#[test]
+fn disassembly_reassembles_to_the_same_bytes() {
+	let src = "
+start:
+        puc32   r1, 5
+        and.flag r1, r1
+        puc32   r2, 6           if r1.flag
+        puc32   r3, 7           if !r1.zero
+        dispil  r30, start
+        tc
+        dispa   r30
+        tc
+        halt
+";
+	let p = assemble(src).expect("assemble");
+	let bytes = p.to_bytes();
+	let text = emu::dis::disassemble_range(&bytes, 0, 0, &p.labels);
+
+	// Strip the address and encoding columns. `disassemble_range` indents
+	// instructions by two spaces and emits label lines flush-left, and no
+	// instruction text contains a double space, so the last column is the text.
+	let round: String = text
+		.lines()
+		.map(|l| match l.strip_prefix("  ") {
+			Some(_) => format!("        {}\n", l.rsplit("  ").next().unwrap_or("").trim()),
+			None => format!("{l}\n"),
+		})
+		.collect();
+
+	let p2 = assemble(&round).expect("reassemble the disassembly");
+	assert_eq!(bytes, p2.to_bytes(), "round trip changed the bytes:\n{round}");
 }

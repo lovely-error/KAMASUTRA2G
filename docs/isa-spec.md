@@ -419,7 +419,7 @@ If `nisa` is not valid, `PerformJump` does nothing and execution falls through. 
 predicated branch is:
 
 ```
-XCP rA, cond : DISPI target
+XCP rA, cond : DISPI target          ; spelled `dispi target  if rA.cond` in kasm
 TC
 ```
 
@@ -436,8 +436,8 @@ This costs nothing in hardware — `nisa` is a plain latch — and it makes the 
 idiom well defined:
 
 ```
-XCP rA, FLAG_SET : DISPI  then_target
-XCN rA, FLAG_SET : DISPI  else_target
+XCP rA, FLAG_SET : DISPI  then_target    ; dispi then_target  if rA.flag
+XCN rA, FLAG_SET : DISPI  else_target    ; dispi else_target  if !rA.flag
 TC
 ```
 

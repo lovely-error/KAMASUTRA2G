@@ -16,7 +16,7 @@ loop:
 
         ; Branch when the byte is NUL. VALUE_ZERO tests the register's value
         ; directly, so no separate compare is needed.
-        xcp     r3, zero: dispi done
+        dispi   done            if r3.zero
         tc                      ; when r3 != 0 the DISPI was suppressed, so
                                 ; nisa is unprimed and this falls through
 

@@ -79,20 +79,28 @@ impl Program {
 enum Operand {
 	Reg(u16),
 	Imm(i64),
+	/// Also covers a bare identifier used as a type tag, as in `rdt r7, u8`.
 	Label(String),
 	/// `[rN]` or `[rN + off]`
 	Mem { base: u16, offset: i64 },
-	/// A bare identifier used as a condition code or type tag.
-	Name(String),
+}
+
+/// A trailing `if [!]rN.cc` clause, which becomes an XCP/XCN prefix.
+#[derive(Debug, Clone, Copy)]
+struct Cond {
+	rix: u16,
+	cc: CC,
+	inverted: bool,
 }
 
 #[derive(Debug, Clone)]
 struct Stmt {
 	line: usize,
-	/// Prefix mnemonics written before a `:` on the same logical instruction.
-	prefixes: Vec<(String, Vec<Operand>)>,
 	mnemonic: String,
+	/// The mnemonic carried a `.flag` suffix: write flags, not a value.
+	on_flags: bool,
 	operands: Vec<Operand>,
+	cond: Option<Cond>,
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +260,9 @@ fn parse_line(raw: &str, line: usize, items: &mut Vec<Item>) -> R<()> {
 			&& name.chars().all(|c| c.is_alphanumeric() || c == '_')
 			&& name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
 		if is_ident && !name.ends_with(':') {
+			if is_reserved_word(name) {
+				return err(line, format!("`{name}` is reserved by the instruction grammar"));
+			}
 			let rhs = s[eq + 1..].trim();
 			let Some(v) = parse_int(rhs) else {
 				return err(line, format!("`{name} = {rhs}` needs an integer value"));
@@ -271,9 +282,8 @@ fn parse_line(raw: &str, line: usize, items: &mut Vec<Item>) -> R<()> {
 		{
 			break;
 		}
-		// A prefix mnemonic also ends in `:`; distinguish by known names.
-		if is_prefix_mnemonic(head) {
-			break;
+		if is_reserved_word(head) {
+			return err(line, format!("`{head}` is reserved by the instruction grammar"));
 		}
 		items.push(Item::Label(head.to_string(), line));
 		s = s[colon + 1..].trim();
@@ -300,55 +310,121 @@ fn parse_line(raw: &str, line: usize, items: &mut Vec<Item>) -> R<()> {
 		return Ok(());
 	}
 
-	// Prefix chain: `xcp r3, zero : add r4, r2`
-	let mut prefixes = Vec::new();
-	loop {
-		let Some(colon) = s.find(':') else { break };
-		let head = s[..colon].trim();
-		let (m, rest) = match head.find(char::is_whitespace) {
-			Some(i) => (&head[..i], head[i..].trim()),
-			None => (head, ""),
-		};
-		if !is_prefix_mnemonic(m) {
-			break;
-		}
-		let ops = if rest.is_empty() {
-			Vec::new()
-		} else {
-			split_operands(rest).iter().map(|o| parse_operand(o, line)).collect::<R<Vec<_>>>()?
-		};
-		prefixes.push((m.to_ascii_lowercase(), ops));
-		s = s[colon + 1..].trim();
-	}
-
-	if s.is_empty() {
-		return err(line, "prefix with no instruction after it");
-	}
-
-	let (mnemonic, rest) = match s.find(char::is_whitespace) {
+	// `<mnemonic>[.flag] <operands> [if [!]rN.cc]`
+	let (head, rest) = match s.find(char::is_whitespace) {
 		Some(i) => (&s[..i], s[i..].trim()),
 		None => (s, ""),
 	};
-	let operands = if rest.is_empty() {
+	let head = head.to_ascii_lowercase();
+	let (mnemonic, on_flags) = match head.split_once('.') {
+		None => (head.as_str(), false),
+		Some((m, "flag")) => (m, true),
+		Some((_, sfx)) => return err(line, format!("unknown mnemonic suffix `.{sfx}`")),
+	};
+
+	let (operand_text, cond) = split_if_clause(rest, line)?;
+	let operands = if operand_text.is_empty() {
 		Vec::new()
 	} else {
-		split_operands(rest).iter().map(|o| parse_operand(o, line)).collect::<R<Vec<_>>>()?
+		split_operands(operand_text).iter().map(|o| parse_operand(o, line)).collect::<R<Vec<_>>>()?
 	};
 
 	items.push(Item::Stmt(Stmt {
 		line,
-		prefixes,
-		mnemonic: mnemonic.to_ascii_lowercase(),
+		mnemonic: mnemonic.to_string(),
+		on_flags,
 		operands,
+		cond,
 	}));
 	Ok(())
 }
 
-fn is_prefix_mnemonic(m: &str) -> bool {
-	matches!(
-		m.to_ascii_lowercase().as_str(),
-		"xcp" | "xcn" | "uto" | "flag"
-	)
+/// Words the statement grammar claims, so they cannot also name a label.
+fn is_reserved_word(w: &str) -> bool {
+	w.eq_ignore_ascii_case("if")
+}
+
+/// Splits a statement's operands from a trailing `if [!]rN.cc` clause.
+///
+/// Has to run before `split_operands` because the clause is delimited by
+/// whitespace while operands are delimited by commas, so in
+/// `st [r5], r7 if r1.zero` the keyword sits inside what would otherwise be
+/// the last operand.
+fn split_if_clause(s: &str, line: usize) -> R<(&str, Option<Cond>)> {
+	let Some(kw) = find_if_keyword(s) else {
+		return Ok((s, None));
+	};
+	let head = s[..kw].trim();
+	let tail = s[kw + 2..].trim();
+	if find_if_keyword(tail).is_some() {
+		return err(line, "only one `if` clause per instruction");
+	}
+	if tail.is_empty() {
+		return err(line, "`if` needs a condition, e.g. `if r3.zero`");
+	}
+	// `!` inverts the sense: XCN rather than XCP.
+	let (inverted, tok) = match tail.strip_prefix('!') {
+		Some(t) => (true, t.trim()),
+		None => (false, tail),
+	};
+	if tok.is_empty() || tok.contains(char::is_whitespace) {
+		return err(line, format!("`if {tail}` should be a single condition like `r3.zero`"));
+	}
+	let (rix, cc) = parse_cond(tok, line)?;
+	Ok((head, Some(Cond { rix, cc, inverted })))
+}
+
+/// Byte offset of a whitespace-delimited `if` token at bracket depth zero,
+/// outside any quoted span.
+fn find_if_keyword(s: &str) -> Option<usize> {
+	let b = s.as_bytes();
+	let mut depth = 0i32;
+	let mut quote: Option<u8> = None;
+	let mut i = 0;
+	while i < b.len() {
+		let c = b[i];
+		match quote {
+			Some(q) => {
+				if c == b'\\' {
+					i += 2;
+					continue;
+				}
+				if c == q {
+					quote = None;
+				}
+			}
+			None => match c {
+				b'"' | b'\'' => quote = Some(c),
+				b'[' => depth += 1,
+				b']' => depth -= 1,
+				b'i' | b'I'
+					if depth == 0
+						&& (i == 0 || b[i - 1].is_ascii_whitespace())
+						&& matches!(b.get(i + 1), Some(b'f') | Some(b'F'))
+						&& b.get(i + 2).map_or(true, |c| c.is_ascii_whitespace()) =>
+				{
+					return Some(i);
+				}
+				_ => {}
+			},
+		}
+		i += 1;
+	}
+	None
+}
+
+/// `rN.cc` -- a register paired with the condition to test on it.
+///
+/// Needs its own parser because `parse_operand` accepts `.` inside identifiers
+/// and would happily take `r4.overflow` for a label.
+fn parse_cond(tok: &str, line: usize) -> R<(u16, CC)> {
+	let Some((reg, cc)) = tok.rsplit_once('.') else {
+		return err(line, format!("condition `{tok}` needs a register and a flag, e.g. `r3.zero`"));
+	};
+	let Some(rix) = parse_reg(reg) else {
+		return err(line, format!("bad register `{reg}` in condition `{tok}`"));
+	};
+	Ok((rix, cond_code(cc, line)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -446,7 +522,7 @@ fn reg_of(op: &Operand, line: usize) -> R<u16> {
 
 fn name_of(op: &Operand, line: usize) -> R<String> {
 	match op {
-		Operand::Label(n) | Operand::Name(n) => Ok(n.clone()),
+		Operand::Label(n) => Ok(n.clone()),
 		_ => err(line, "expected a name"),
 	}
 }
@@ -463,33 +539,20 @@ fn encode_stmt(st: &Stmt, ctx: &Ctx) -> R<Vec<u16>> {
 		Ok(())
 	};
 
-	// Prefixes are emitted ahead of the main code point.
+	// The predicate is a prefix code point, emitted ahead of the main one.
 	let mut out: Vec<u16> = Vec::new();
-	let mut uto_reg: Option<u16> = None;
-	let mut flag_prefix = false;
-	for (pm, pops) in &st.prefixes {
-		match pm.as_str() {
-			"xcp" | "xcn" => {
-				if pops.len() != 2 {
-					return err(line, "xcp/xcn take a register and a condition code");
-				}
-				let r = reg_of(&pops[0], line)?;
-				let cc = cond_code(&name_of(&pops[1], line)?, line)?;
-				out.extend_from_slice(&if pm == "xcp" {
-					encode_xcp(r, cc)
-				} else {
-					encode_xcn(r, cc)
-				});
-			}
-			"uto" => {
-				if pops.len() != 1 {
-					return err(line, "uto takes one register");
-				}
-				uto_reg = Some(reg_of(&pops[0], line)?);
-			}
-			"flag" => flag_prefix = true,
-			other => return err(line, format!("unknown prefix `{other}`")),
-		}
+	if let Some(c) = st.cond {
+		out.extend_from_slice(&if c.inverted {
+			encode_xcn(c.rix, c.cc)
+		} else {
+			encode_xcp(c.rix, c.cc)
+		});
+	}
+
+	// Only these four route through a flag-writing encoder; anywhere else the
+	// suffix would silently do nothing, which is worse than refusing it.
+	if st.on_flags && !matches!(st.mnemonic.as_str(), "and" | "or" | "xor" | "not") {
+		return err(line, format!("`.flag` does not apply to `{}`", st.mnemonic));
 	}
 
 	let alu = |lb: LB, out: &mut Vec<u16>| -> R<()> {
@@ -619,7 +682,7 @@ fn encode_stmt(st: &Stmt, ctx: &Ctx) -> R<Vec<u16>> {
 				"or" => LB::LB_OR,
 				_ => LB::LB_XOR,
 			};
-			if flag_prefix {
+			if st.on_flags {
 				need(2)?;
 				let d = reg_of(&ops[0], line)?;
 				let s = reg_of(&ops[1], line)?;
@@ -636,7 +699,7 @@ fn encode_stmt(st: &Stmt, ctx: &Ctx) -> R<Vec<u16>> {
 			need(1)?;
 			let d = reg_of(&ops[0], line)?;
 			// flag_not is a two-code-point form (EP2_FLAG prefix + NOT); inv is one.
-			if flag_prefix {
+			if st.on_flags {
 				out.extend_from_slice(&encode_flag_not(d));
 			} else {
 				out.extend_from_slice(&encode_inv(d));
@@ -703,9 +766,17 @@ fn encode_stmt(st: &Stmt, ctx: &Ctx) -> R<Vec<u16>> {
 		}
 
 		// ---- control transfer ----
-		"dispi" => {
-			need(1)?;
-			let target = ctx.value_of(&ops[0], line)?;
+		// The `l` forms take a link register first and add a UTO prefix, which
+		// turns the jump into a call.
+		"dispi" | "dispil" => {
+			let link = if st.mnemonic == "dispil" {
+				need(2)?;
+				Some(reg_of(&ops[0], line)?)
+			} else {
+				need(1)?;
+				None
+			};
+			let target = ctx.value_of(&ops[n - 1], line)?;
 			// Relative to the start of the whole prefixed instruction, and
 			// scaled by 2 (spec 6.2). `out.len()` already holds the prefixes.
 			let disp_bytes = target - ctx.isa as i64;
@@ -713,7 +784,7 @@ fn encode_stmt(st: &Stmt, ctx: &Ctx) -> R<Vec<u16>> {
 				return err(line, "branch target must be halfword aligned");
 			}
 			let disp = disp_bytes / 2;
-			match uto_reg {
+			match link {
 				Some(link) => {
 					if !(-524288..=524287).contains(&disp) {
 						return err(line, format!("branch displacement {disp} does not fit"));
@@ -731,20 +802,21 @@ fn encode_stmt(st: &Stmt, ctx: &Ctx) -> R<Vec<u16>> {
 				}
 			}
 		}
-		"disp" => {
-			need(1)?;
-			let r = reg_of(&ops[0], line)?;
-			out.extend_from_slice(&match uto_reg {
-				Some(link) => encode_disp_reg_off_link(link, r).to_vec(),
-				None => encode_disp_reg_off(r).to_vec(),
-			});
-		}
-		"dispa" => {
-			need(1)?;
-			let r = reg_of(&ops[0], line)?;
-			out.extend_from_slice(&match uto_reg {
-				Some(link) => encode_disp_reg_addr_link(link, r).to_vec(),
-				None => encode_disp_reg_addr(r).to_vec(),
+		"disp" | "displ" | "dispa" | "dispal" => {
+			let absolute = st.mnemonic.starts_with("dispa");
+			let link = if st.mnemonic.ends_with('l') {
+				need(2)?;
+				Some(reg_of(&ops[0], line)?)
+			} else {
+				need(1)?;
+				None
+			};
+			let r = reg_of(&ops[n - 1], line)?;
+			out.extend_from_slice(&match (absolute, link) {
+				(false, None) => encode_disp_reg_off(r).to_vec(),
+				(false, Some(l)) => encode_disp_reg_off_link(l, r).to_vec(),
+				(true, None) => encode_disp_reg_addr(r).to_vec(),
+				(true, Some(l)) => encode_disp_reg_addr_link(l, r).to_vec(),
 			});
 		}
 		"tc" => {
@@ -763,11 +835,6 @@ fn encode_stmt(st: &Stmt, ctx: &Ctx) -> R<Vec<u16>> {
 		other => return err(line, format!("unknown mnemonic `{other}`")),
 	}
 
-	if uto_reg.is_some()
-		&& !matches!(st.mnemonic.as_str(), "dispi" | "disp" | "dispa" | "mul" | "mulw")
-	{
-		return err(line, "the `uto` prefix only applies to jumps and multiply");
-	}
 	Ok(out)
 }
 

@@ -35,7 +35,7 @@ has several forms:
   0x0004:  f040                  puc32 r2, 0
 loop:
   0x0006:  e861                  ld8 r3, [r1]
-  0x0008:  7c7d 8409             xcp r3, zero: dispi done
+  0x0008:  7c7d 8409             dispi done if r3.zero
 ```
 
 ## Lines
@@ -199,7 +199,7 @@ nop
 Nothing happens until the `tc`:
 
 ```
-        xcp     r3, zero: dispi done
+        dispi   done            if r3.zero
         tc                              ; falls through when r3 != 0
 ```
 
@@ -211,16 +211,23 @@ work, so an unprimed `tc` is a defined no-op rather than an error.
 everything from labels — the reference program originally shipped with both its
 branches miscalculated by hand, which is what motivated writing this.
 
-## Prefixes
+## Modifiers
 
-Written before a colon, on the same line as the instruction they modify:
+An instruction is one or more prefix code points followed by a single main one.
+Rather than spell that split out, the assembly syntax folds each prefix into the
+instruction it modifies:
 
 ```
-xcp  rN, cond:  insn     ; execute only if the condition holds
-xcn  rN, cond:  insn     ; execute only if it does not
-uto  rN:        insn     ; link register / widening-multiply high half
-flag:           insn     ; operate on flag bits rather than values
+<mnemonic>[.flag] <operands> [if [!]rN.cond]
 ```
+
+```
+insn  ops   if rN.cond      ; execute only if the condition holds  (XCP)
+insn  ops   if !rN.cond     ; execute only if it does not          (XCN)
+insn.flag   ops             ; operate on flag bits rather than values
+```
+
+The link prefix is folded into the mnemonic instead — see the `l` forms below.
 
 Conditions, with accepted spellings:
 
@@ -236,12 +243,22 @@ Any instruction may be predicated, on any register — there is no global
 condition register. A false predicate suppresses every effect but still
 advances the PC by the instruction's full length.
 
-`uto` turns `dispi`/`disp`/`dispa` into a call and `mul` into a widening
-multiply. The link value points at the `tc` that follows the jump, not past it,
-so returning to it re-executes a harmless unprimed `tc`:
+Note that `flag` appears in both roles: `and.flag` *writes* flag bits, while
+`if rN.flag` *reads* one. They sit in different slots, so there is no ambiguity.
+
+An `l` suffix adds a link register, turning a jump into a call. The link
+register is the first operand, and the link value points at the `tc` that
+follows the jump, not past it, so returning to it re-executes a harmless
+unprimed `tc`:
+
+| Jump | Call |
+|---|---|
+| `dispi target` | `dispil rL, target` |
+| `disp rN` | `displ rL, rN` |
+| `dispa rN` | `dispal rL, rN` |
 
 ```
-        uto r30: dispi subroutine
+        dispil  r30, subroutine
         tc
         ...
 subroutine:
@@ -250,8 +267,12 @@ subroutine:
         tc
 ```
 
-`flag` applies to `and`, `or`, `xor` and `not`. It has no immediate form —
-there is no such thing as an immediate flag bit — and `flag: neg` is illegal.
+The same underlying prefix supplies the high half of a widening multiply, which
+is spelled `mulw` (see above) rather than as a modifier.
+
+`.flag` applies to `and`, `or`, `xor` and `not`. It has no immediate form —
+there is no such thing as an immediate flag bit — and `neg.flag` is illegal.
+`kasm` rejects the suffix anywhere else rather than silently ignoring it.
 
 ## Directives
 
@@ -310,13 +331,13 @@ with what would actually execute.
 
 ```
   0x0000:  f020                  puc32 r1, 0
-  0x0008:  7c7d 840a             xcp r3, zero: dispi 0x1c
+  0x0008:  7c7d 840a             dispi 0x1c if r3.zero
   0x000c:  ffbf                  tc
   0x0016:  7bff d47f             add r3, -1
 ```
 
-Each line is address, raw code points, then the decoded instruction —
-prefixes and all, since a prefixed instruction is one instruction.
+Each line is address, raw code points, then the decoded instruction — modifiers
+and all, since a prefixed instruction is one instruction.
 
 An undecodable code point is reported inline and decoding continues at the next
 halfword, so a partly valid image still produces a useful listing:

@@ -51,13 +51,13 @@ restart:
 
 next:
         cpy     r3, r1
-        uto r30: dispi show             ; call; link lands on the TC below
+        dispil  r30, show       ; call; link lands on the TC below
         tc
 
         ; ---- advance: t = a + b, a = b, b = t ----
         cpy     r4, r1
         add     r4, r2                  ; sets overflow on carry out of bit 31
-        xcp     r4, overflow: dispi finish
+        dispi   finish          if r4.overflow
         tc
         cpy     r1, r2
         cpy     r2, r4
@@ -70,7 +70,7 @@ next:
 ; straight from 1836311903 back to zero.
 finish:
         cpy     r3, r2
-        uto r30: dispi show
+        dispil  r30, show
         tc
         dispi   restart
         tc
@@ -110,7 +110,7 @@ digit_loop:
         add     r5, 1
 
         cpy     r3, r8
-        xcn     r3, zero: dispi digit_loop
+        dispi   digit_loop      if !r3.zero
         tc
 
 emit:
@@ -118,7 +118,7 @@ emit:
         ld8     r7, [r5]
         out     r10, r7
         gt      r5, r9                  ; more digits below the pointer?
-        xcp     r5, flag: dispi emit
+        dispi   emit            if r5.flag
         tc
 
         ; CRLF: a serial terminal does not return the carriage on a bare LF.
@@ -131,7 +131,7 @@ emit:
         puc32   r11, DELAY
 wait:
         add     r11, -1
-        xcn     r11, zero: dispi wait
+        dispi   wait            if !r11.zero
         tc
 
         dispa   r30
