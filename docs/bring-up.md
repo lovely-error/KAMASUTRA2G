@@ -141,13 +141,44 @@ post-synthesis netlist has 155 flip-flops on `clk_out` and 14 on `clk_27m`,
 and those 14 are the reset chain above — so the controller drives nothing from
 `clk` in this configuration and its frequency cannot be the problem.
 
-### Simulating it
+### Simulating it — `bash rtl/sim/psram.sh`
 
-Not viable out of the box. `psram_memory_interface_hs.vo` is a readable
-post-PnR model and `prim_sim.v` ships with the IDE, so the *controller* would
-elaborate — but no model of the memory device (W955D8MBYA) exists anywhere in
-the install. Calibration against an undriven bus would hang for a different
-reason than hardware does, which is worse than not simulating at all.
+`psram_memory_interface_hs.vo` is a readable post-PnR model (plain LUTs and
+DFFs, not encrypted) and `prim_sim.v` ships with the IDE, so the controller
+simulates. **No model of the memory device exists anywhere in the install**, so
+calibration cannot converge and `init_calib` will not rise here. The run
+answers a narrower question instead: does the controller ever get as far as the
+memory?
+
+Two obstacles, neither discoverable:
+
+- Questa Starter refuses to elaborate past 5000 instances and this is about
+  18000. Suppressible, but **only by its own id**: `-suppress 14408` is
+  accepted and silently does nothing, `-voptargs=-suppress=...` is rejected,
+  and `-suppress vopt-14408` works.
+- It takes about 18 minutes of wall time for 2 ms of simulated time.
+
+Result, with the memory clock at 135 MHz:
+
+| | |
+|---|---|
+| `clk_out` edges in 2 ms | 135105 → 67.5 MHz, confirming memory_clk/2 |
+| `O_psram_ck` edges | 530510 → ~135 MHz reaching the device |
+| `cs_n` first driven low | ~497 µs |
+| `cmd_rdy` / `init_calib` | 1 / 0 |
+
+**So the controller is healthy inside the fabric.** It runs both clocks,
+finishes its internal startup and addresses the memory; it is not wedged on
+clocks, reset, or its own state machine. That rules out the whole class the
+reset fix was chasing, and explains why that fix changed nothing on hardware.
+
+It reaches the memory and waits — which in simulation is expected, and on
+hardware means the problem is in the interaction with the device. That is where
+an IP generated for 166 MHz and driven at 135 would fail.
+
+Incidental but useful: `cmd_rdy` is high while `init_calib` is still low, so
+`cmd_rdy` alone is not a valid "ready to use" gate. And initialization takes
+around half a millisecond before anything appears on the bus.
 
 | | |
 |---|---|
