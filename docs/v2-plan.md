@@ -197,39 +197,49 @@ Two things had to move into the retirement contract, both because X now runs ahe
   drops the last instruction and reports "RTL stopped, emulator did not", which reads exactly like
   a core bug and is not one.
 
-### ⚠ The forwarding is correct but unexercised
+### Two bottlenecks, one of them in the testbench
 
-Measured, with a probe counting hazards across the X→W boundary: **`raw_across_XW = 0`** on both
-`hello` and `fib`, and removing value forwarding entirely still passes the whole cosimulation.
-Back-to-back retirement does happen (48 times in `hello`), but CPI is 3.3–5.7 — the front end
-cannot feed X fast enough for consecutive *dependent* instructions to overlap, so the mux never
-fires.
+Chasing why forwarding was never exercised found both, and they compounded.
 
-Three mutants written for it all reported `MISSED` and were removed rather than left as vacuous
-passes. **This is a real gap, not a cosmetic one**: when the front end gets faster — Phase 2d's
-shadow prefetch, or Phase 3's caches — RAW hazards appear for the first time, and any bug here
-surfaces then, far from this change.
+**`k2g_mem_slow` accepted a request only every other cycle.** Its zero-latency path went
+`S_IDLE → S_RESP → S_IDLE`, so `req_ready` was false half the time — capping the bus at 0.5
+requests per cycle. The synthesizable `k2g_bsram_port` it stands in for ties `req_ready` high and
+is fully pipelined, so **simulation was starving the core in a way hardware never did**, and every
+cycles-per-instruction figure measured before this was measuring the model. The response is now a
+register rather than a state.
 
-**Attempted and did not close it.** `emu/programs/hazard.kasm` now exists and does nothing but
-create back-to-back dependencies — chained `add r1, r1`, `rdt` immediately followed by a store that
-takes its width from that tag, a compare immediately consumed by a predicate, an overflow-setting
-add immediately predicated on. It runs clean under cosim (34 instructions, 1125 checks), and the
-three mutants **still report `MISSED`**. Deleting value forwarding outright still passes it.
+**Credit must cover the round trip, not the buffer.** A code point holds a credit from issue until
+decode consumes it — issue at *k*, answer at *k+1*, buffer output at *k+2*, consumed at *k+2*:
+three cycles. Sustained rate is credit/3, so a credit of 2 caps fetch at 0.67 code points per cycle
+however fast memory is. The F→D buffer is now two chained skids, depth 4, with `issue_addr`
+widened to 4 entries to match — a queue shorter than the credit wraps and pairs code points with
+the wrong addresses, which corrupts `isa` rather than the instruction and would surface as wrong
+fault addresses and branch targets.
 
-So the conclusion is sharper than "the programs don't happen to hazard": **X and W apparently never
-hold dependent consecutive instructions at all**, even when every instruction depends on its
-predecessor. Something in the D→X cadence serialises them, and the naive model — D emits a uop per
-code point, X fires every cycle, so consecutive single-code-point instructions overlap — is wrong
-somewhere.
+| CPI | before | model fixed | + depth 4 |
+|---|---|---|---|
+| `fib` | 3.26 | 3.35 | **2.33** |
+| `hazard` | 3.50 | 3.57 | **1.86** |
+| `hello` | 5.65 | — | 5.60 (UART-bound) |
 
-That is worth understanding on its own, independently of forwarding, because it is also why CPI is
-3.3–5.7 when fetch supplies one code point per cycle. **Find where the cycles go first**; the
-answer probably explains both. Then restore the three mutants (`no-value-forwarding`,
-`no-tag-forwarding`, `forwarding-ignores-field-enable`) — they are known-good tests waiting for a
-design that can fail them.
+Cost: 4412 LUT and 1155 registers, up from 4374/1052. Fmax still meets 13.5 MHz.
 
-Until then the forwarding logic is unproven. It is not known to be wrong; it is known to be
-untested.
+### Forwarding: value and tag proven, flag unreachable
+
+With both bottlenecks fixed, hazards appear: `fib` went from 0 to 19 read-after-write pairs
+crossing X→W, `hazard.kasm` from 0 to 16. `no-value-forwarding` and `no-tag-forwarding` are now
+**caught** and are back in `mutants.sh`.
+
+The flag and predicate paths are a different matter, and it is structural rather than a gap in the
+tests: **every instruction that reads a flag carries a prefix** — `XCP`/`XCN` to predicate, `FLAG`
+for a flag-wise logic op. So it is at least two code points, and at one code point per cycle its
+execute stage lands at least two cycles after its producer's — by which time the producer has
+committed out of W and the register file already holds the value. Those muxes cannot be reached.
+
+They are kept, because that is a property of the front end and not of the ISA: a wider fetch closes
+the gap and makes them live. `mutants.sh` does not carry a mutant for them, because it would report
+`MISSED` forever and a test that cannot fail is worse than no test. `k2g_core.sv` says so at the
+declaration.
 
 **2d — still to do.** Shadow prefetch on `PrepareJump` for zero-bubble branches. That is also the
 main lever on the CPI above.

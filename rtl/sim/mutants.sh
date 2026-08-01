@@ -94,7 +94,7 @@ cosim40
 --
 abandoned-fetch-not-dropped
 k2g_core.sv
-  assign f2d_in.valid = if_answer && (drop == 2'd0);
+  assign f2d_in.valid = if_answer && (drop == 3'd0);
   assign f2d_in.valid = if_answer;
 detect
 -
@@ -107,6 +107,22 @@ k2g_core.sv
 detect
 -
 cosim40
+--
+no-value-forwarding
+k2g_core.sv
+  wire logic [31:0] xa_value = (ma && we_value)    ? w_value    : ra_value;
+  wire logic [31:0] xa_value = ra_value;
+detect
+-
+cosim0
+--
+no-tag-forwarding
+k2g_core.sv
+  wire logic [2:0]  xb_tag   = (mb && we_tag)      ? w_tag      : rb_tag;
+  wire logic [2:0]  xb_tag   = rb_tag;
+detect
+-
+cosim0
 EOF
 
 # ---- runner ------------------------------------------------------------

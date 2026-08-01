@@ -101,6 +101,7 @@ fi
 PROGRAMS=(
     "hello.bin:Hello"
     "fib.bin:55"
+    "hazard.bin:"
 )
 
 # Assemble the images from source so RTL and emulator always run the same bits.

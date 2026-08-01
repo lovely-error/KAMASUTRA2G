@@ -44,7 +44,7 @@ module k2g_mem_slow #(
 
   import k2g_types::*;
 
-  typedef enum logic [1:0] { S_IDLE, S_WAIT, S_ACCESS, S_RESP } state_e;
+  typedef enum logic [1:0] { S_IDLE, S_WAIT, S_ACCESS } state_e;
 
   state_e   state;
   mem_req_t held;
@@ -86,8 +86,25 @@ module k2g_mem_slow #(
   end
 
   // The read data arrives from the BSRAM the cycle after the access, so the
-  // response is one cycle behind whichever path issued it.
-  assign bus.rsp_valid = (state == S_RESP);
+  // response is one cycle behind whichever path issued it -- a register, not a
+  // state, so that a zero-latency access does NOT occupy the model for a
+  // second cycle.
+  //
+  // It used to be a state, which made `req_ready` false every other cycle and
+  // capped the bus at half a request per cycle. That is strictly worse than
+  // the k2g_bsram_port it stands in for, which ties `req_ready` high and is
+  // fully pipelined -- so simulation was starving the core in a way hardware
+  // does not, and every cycles-per-instruction figure measured from here was
+  // measuring this model.
+  logic rsp_q;
+
+  always_ff @(posedge clk) begin
+    if (!rst_n) rsp_q <= 1'b0;
+    else        rsp_q <= (fast_path  && !is_write) ||
+                         ((state == S_ACCESS) && !held_write);
+  end
+
+  assign bus.rsp_valid = rsp_q;
   assign bus.rsp_data  = b_rdata;
 
   always_ff @(posedge clk) begin
@@ -104,8 +121,9 @@ module k2g_mem_slow #(
           if (bus.req_valid) begin
             held <= bus.req;
             if (draw == 32'd0) begin
-              // Issued this cycle by the combinational path above.
-              state <= is_write ? S_IDLE : S_RESP;
+              // Issued this cycle by the combinational path above, and the
+              // model stays idle so the next request can be accepted at once.
+              state <= S_IDLE;
             end else begin
               countdown <= draw;
               state     <= S_WAIT;
@@ -118,9 +136,7 @@ module k2g_mem_slow #(
           countdown <= countdown - 1;
         end
 
-        S_ACCESS: state <= held_write ? S_IDLE : S_RESP;
-
-        S_RESP:   state <= S_IDLE;
+        S_ACCESS: state <= S_IDLE;
 
         default:  state <= S_IDLE;
       endcase

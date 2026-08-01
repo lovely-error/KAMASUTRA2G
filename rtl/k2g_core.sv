@@ -76,12 +76,30 @@ module k2g_core
   // answer before asking again would be simpler and would halve fetch
   // throughput: BSRAM answers in one cycle, so a request must go out in the
   // same cycle the previous answer arrives to keep one code point per cycle.
-  localparam int F2D_DEPTH = 2;      // k2g_skid's capacity
+  // CREDIT MUST COVER THE ROUND TRIP, NOT JUST THE BUFFER.
+  //
+  // A code point holds a credit from the cycle it is requested until decode
+  // consumes it: issue at k, the bus answers at k+1, it appears at the
+  // buffer's output at k+2, and decode takes it at k+2. Three cycles of
+  // occupancy. Sustained throughput is therefore credit/3 code points per
+  // cycle, so a credit of 2 caps fetch at 0.67 -- decode can never be fed
+  // every cycle no matter how fast the memory is.
+  //
+  // That single number was responsible for three separate symptoms: a CPI of
+  // 3.3 to 5.7, X sitting empty 70% of the time, and instructions never
+  // retiring back-to-back -- which in turn made the W->X forwarding
+  // impossible to exercise or test at all.
+  //
+  // Two chained skid buffers give depth 4. Chaining rather than widening
+  // reuses a module that already has its own assertions and mutants, and the
+  // extra cycle of latency costs nothing here: throughput depends on
+  // occupancy, not on latency.
+  localparam int F2D_DEPTH = 4;
 
   logic [31:0] pc;
-  logic [1:0]  inflight;     // requested, not yet handed to decode
-  logic [1:0]  outstanding;  // requested, not yet answered
-  logic [1:0]  drop;         // answers still owed to a stream we walked away from
+  logic [2:0]  inflight;     // requested, not yet handed to decode
+  logic [2:0]  outstanding;  // requested, not yet answered
+  logic [2:0]  drop;         // answers still owed to a stream we walked away from
   logic        redirect;
   logic [31:0] redirect_pc;
   logic        stall;
@@ -98,7 +116,7 @@ module k2g_core
 
   // A pure function of state. Nothing here looks at `req_ready` (rule 3) or at
   // `redirect`, which would drag the data bus's ready into the fetch path.
-  assign ibus.req_valid = !halted_r && (inflight < 2'(F2D_DEPTH));
+  assign ibus.req_valid = !halted_r && (inflight < 3'(F2D_DEPTH));
   assign ibus.req.addr  = pc;
   assign ibus.req.we    = 4'b0000;
   assign ibus.req.wdata = 32'd0;
@@ -107,10 +125,13 @@ module k2g_core
   wire logic if_answer = ibus.rsp_valid;
 
   // Responses are in order, so the address that belongs to each one is simply
-  // the oldest still-unanswered request. Two entries, because at most two are
-  // ever outstanding.
-  logic [31:0] issue_addr [0:1];
-  logic        issue_wp, issue_rp;
+  // the oldest still-unanswered request. FOUR entries, matching the credit:
+  // on a slow bus every credit can be outstanding at once, and a queue shorter
+  // than the credit wraps and pairs code points with the wrong addresses --
+  // which corrupts `isa` rather than the instruction, so it would surface as
+  // wrong fault addresses and wrong branch targets, not as a decode failure.
+  logic [31:0] issue_addr [0:3];
+  logic [1:0]  issue_wp, issue_rp;
 
   // ---- F->D buffer -------------------------------------------------------
   // Payload is the code point and the address it came from. The address has to
@@ -123,14 +144,24 @@ module k2g_core
   // buffered. `valid` is a pulse and never has to be held, because the credit
   // above guarantees the buffer has room -- which is the only reason a
   // response with no `ready` can drive a channel at all.
-  assign f2d_in.valid = if_answer && (drop == 2'd0);
+  assign f2d_in.valid = if_answer && (drop == 3'd0);
   assign f2d_in.data  = {issue_addr[issue_rp], ibus.rsp_data[15:0]};
 
-  k2g_skid #(.WIDTH(48)) u_f2d (
+  k2g_chan #(.WIDTH(48)) f2d_mid ();
+
+  k2g_skid #(.WIDTH(48)) u_f2d_a (
       .clk  (clk),
       .rst_n(rst_n),
       .flush(redirect),
       .up   (f2d_in),
+      .down (f2d_mid)
+  );
+
+  k2g_skid #(.WIDTH(48)) u_f2d_b (
+      .clk  (clk),
+      .rst_n(rst_n),
+      .flush(redirect),
+      .up   (f2d_mid),
       .down (f2d)
   );
 
@@ -145,21 +176,21 @@ module k2g_core
   always_ff @(posedge clk) begin
     if (!rst_n) begin
       pc          <= 32'd0;
-      inflight    <= 2'd0;
-      outstanding <= 2'd0;
-      drop        <= 2'd0;
-      issue_wp    <= 1'b0;
-      issue_rp    <= 1'b0;
+      inflight    <= 3'd0;
+      outstanding <= 3'd0;
+      drop        <= 3'd0;
+      issue_wp    <= 2'd0;
+      issue_rp    <= 2'd0;
     end else begin
       if (if_issue) begin
         issue_addr[issue_wp] <= pc;
-        issue_wp             <= ~issue_wp;
+        issue_wp             <= issue_wp + 2'd1;
         pc                   <= pc + 32'd2;
       end
-      if (if_answer) issue_rp <= ~issue_rp;
+      if (if_answer) issue_rp <= issue_rp + 2'd1;
 
-      outstanding <= outstanding + (if_issue ? 2'd1 : 2'd0)
-                                 - (if_answer ? 2'd1 : 2'd0);
+      outstanding <= outstanding + (if_issue ? 3'd1 : 3'd0)
+                                 - (if_answer ? 3'd1 : 3'd0);
 
       if (redirect) begin
         // Everything already asked for belongs to the old stream, including a
@@ -167,13 +198,13 @@ module k2g_core
         // is flushed, but answers already in the bus cannot be recalled, so
         // they are counted and thrown away as they arrive.
         pc       <= redirect_pc;
-        inflight <= 2'd0;
-        drop     <= outstanding + (if_issue ? 2'd1 : 2'd0)
-                                - (if_answer ? 2'd1 : 2'd0);
+        inflight <= 3'd0;
+        drop     <= outstanding + (if_issue ? 3'd1 : 3'd0)
+                                - (if_answer ? 3'd1 : 3'd0);
       end else begin
-        inflight <= inflight + (if_issue  ? 2'd1 : 2'd0)
-                             - (f2d_take  ? 2'd1 : 2'd0);
-        if (if_answer && (drop != 2'd0)) drop <= drop - 2'd1;
+        inflight <= inflight + (if_issue  ? 3'd1 : 3'd0)
+                             - (f2d_take  ? 3'd1 : 3'd0);
+        if (if_answer && (drop != 3'd0)) drop <= drop - 3'd1;
       end
     end
   end
@@ -306,6 +337,15 @@ module k2g_core
   wire logic        xa_ovf   = (ma && we_overflow) ? w_overflow : ra_overflow;
   wire logic        xb_ovf   = (mb && we_overflow) ? w_overflow : rb_overflow;
   wire logic        xc_ovf   = (mc && we_overflow) ? w_overflow : rc_overflow;
+  // The flag and predicate paths below are believed UNREACHABLE at one code
+  // point per cycle, and are kept because that is a property of the front end
+  // rather than of the ISA. Every instruction that reads a flag carries a
+  // prefix -- XCP/XCN to predicate, FLAG for a flag-wise logic op -- so it is
+  // at least two code points, and its execute cycle therefore lands at least
+  // two after its producer's, by which time the producer has committed and the
+  // register file already has the value. A wider fetch closes that gap and
+  // makes them live again. Mutating them is not detectable today, so
+  // mutants.sh does not claim to.
   wire logic        xa_flag  = (ma && we_flag)     ? w_flag     : ra_flag;
   wire logic        xb_flag  = (mb && we_flag)     ? w_flag     : rb_flag;
   wire logic        xc_flag  = (mc && we_flag)     ? w_flag     : rc_flag;

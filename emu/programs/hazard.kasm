@@ -78,4 +78,36 @@
         cpy     r23, r20        ; takes r20's value, tag and flags
         puc32   r24, 0x7777     if r23.overflow
 
+; ---- fields that must be PRESERVED across a write to their neighbour ---
+; The two above prove a field is forwarded when it is written. These prove it
+; is NOT forwarded when it is not -- which is the whole reason the write
+; enables are per field.
+;
+; `add` writes value and overflow and leaves flag_bit alone, so the predicate
+; below must still see the flag the compare set two instructions earlier.
+; Forwarding the flag on any write instead delivers the arithmetic packet's
+; default of zero, and the guarded instruction silently does not execute.
+        puc32   r25, 5
+        puc32   r26, 5
+        tst     r25, r26        ; r25.flag = 1
+        add     r25, 1          ; writes value + overflow, NOT flag
+        puc32   r27, 0x1234     if r25.flag     ; must still run
+
+; And the mirror: a comparison writes ONLY flag_bit, so the overflow set by
+; the wrapping add must survive it.
+        puc32   r28, 0xFFFFFFFF
+        add     r28, 1          ; sets r28.overflow
+        tst     r28, r28        ; writes only r28.flag
+        puc32   r29, 0x4321     if r28.overflow ; must still run
+
+; ---- flag through the ra port: a FLAG-prefixed logic op ----------------
+; Predication reads the flag through the predicate port; `and.flag` reads it
+; through the first operand port. Different mux, same rule.
+        puc32   r14, 3
+        puc32   r15, 3
+        tst     r14, r15        ; r14.flag = 1
+        tst     r15, r14        ; r15.flag = 1
+        and.flag r14, r15       ; reads both just-written flags
+        puc32   r16, 0x9999     if r14.flag
+
         halt
