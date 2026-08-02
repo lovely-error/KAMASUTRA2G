@@ -131,6 +131,70 @@ k2g_cdc_fifo.sv
 detect
 tb_cdc_fifo
 run
+--
+psram-write-beat-select
+k2g_psram.sv
+    if ((state == S_WRITE) && (beat == {1'b0, p_beat})) begin
+    if ((state == S_WRITE) && (beat == 5'd0)) begin
+detect
+tb_psram_adapter
+run
+--
+psram-write-half-select
+k2g_psram.sv
+      if (p_high) data_mask = {~p_we, 4'hF};
+      if (!p_high) data_mask = {~p_we, 4'hF};
+detect
+tb_psram_adapter
+run
+--
+psram-write-data-not-held
+k2g_psram.sv
+  assign wr_data = {p_wdata, p_wdata};
+  assign wr_data = {p_wdata + {27'd0, beat}, p_wdata + {27'd0, beat}};
+detect
+tb_psram_adapter
+run
+--
+psram-read-half-select
+k2g_psram.sv
+  wire logic [31:0] beat_word = p_high ? rd_data[63:32] : rd_data[31:0];
+  wire logic [31:0] beat_word = rd_data[31:0];
+detect
+tb_psram_adapter
+run
+--
+psram-fetch-halfword-select
+k2g_psram.sv
+  wire logic [15:0] beat_half = p_haddr[0] ? beat_word[31:16] : beat_word[15:0];
+  wire logic [15:0] beat_half = beat_word[15:0];
+detect
+tb_psram_adapter
+run
+--
+psram-response-routing
+k2g_psram.sv
+      irsp_v <= rspf_pop && !rsp_out.src;
+      irsp_v <= rspf_pop;
+detect
+tb_psram_adapter
+run
+--
+psram-command-interval-ignored
+k2g_psram.sv
+          gap     <= TCMD;
+          gap     <= 6'd0;
+detect
+tb_psram_adapter
+run
+--
+psram-command-before-calibration
+k2g_psram.sv
+                      && init_calib      // NOT cmd_rdy alone: that is high
+                      && 1'b1            // NOT cmd_rdy alone: that is high
+detect
+tb_psram_adapter
+run
 EOF
 
 # ---- runner ------------------------------------------------------------

@@ -367,11 +367,63 @@ The ISA-specific traps, each of which is a real one:
 the adapter depends on is measured and tabulated in `docs/bring-up.md` — burst geometry, command
 spacing, write-beat phase, mask semantics. `rtl/k2g_cdc_fifo.sv` is written and tested.
 
-**Still to write: `rtl/k2g_psram.sv`.** A `k2g_membus` slave pair (`ibus`, `dbus`) in `clk_sys`
-with a simple arbiter, across `k2g_cdc_fifo` in both directions, into a burst sequencer in
-`clk_out`. Reads are self-timed off `rd_data_valid`; writes hold data for 16 beats and open the
-mask on one. It needs a behavioural model of the controller to test against, since the real IP
-cannot converge in simulation without a memory device.
+**3b done — `rtl/k2g_psram.sv`.** A `k2g_membus` slave pair (`ibus`, `dbus`) in `clk_sys` behind a
+round-robin arbiter, across `k2g_cdc_fifo` in both directions, into a burst sequencer in `clk_out`.
+Reads are self-timed off `rd_data_valid`; writes hold data for all 16 beats and open the mask on
+one. The controller is *not* instantiated in it — it is a black box with pins, so it belongs beside
+the `.cst` that names them, and keeping it out is what makes the adapter simulatable and
+synthesizable on its own.
+
+Measured alone: **362 of 8640 logic cells** (212 LUT, 6 ALU, 24 RAM16) and **220 registers**. The
+FIFOs went to distributed SSRAM rather than BSRAM, so the 19 free blocks the caches want are
+untouched.
+
+Three things settled while writing it that were not obvious from the plan:
+
+- **One command in flight, and a 32-bit access costs a whole 128-byte burst.** 124 of those bytes
+  are discarded. Keeping them is a cache, and half a cache built here would be sized against the
+  wrong constraints and thrown away in Phase 4. The price is about 32 `clk_out` cycles per access —
+  roughly 6 core cycles at 13.5 MHz — plus a crossing each way, which is what "works, slowly" costs.
+- **The fetch port's 16-bit response contract had to move here.** `ibus` responses carry a code
+  point in bits [15:0], selected by address bit 1; that has always been `k2g_mem` port A's doing and
+  `k2g_core` relies on it, so whatever answers the fetch port has to keep providing it. Requests
+  therefore carry `addr[22:1]`, not just the word. The tidier home is the core's fetch unit, which
+  already keeps `issue_addr` beside every outstanding request — worth moving when Phase 4 touches
+  both ends anyway.
+- **Calibration status crosses as a token stream, not as a synchronizer.** It is a level in
+  `clk_out` that `clk_sys` wants for an LED, and the standing rule says every crossing goes through
+  `k2g_cdc_fifo`. A one-bit FIFO pushed for as long as `init_calib` is high costs about twenty flops
+  and keeps the rule literally true, which — with no static CDC tool in this toolchain — is the only
+  enforcement there is. Repeating tokens rather than one, because the two sides do not leave reset
+  together and a status bit lost to a reset on one side would be lost forever.
+
+  Nothing else needs it: requests simply queue until the controller answers, so the boot copier does
+  not have to wait for calibration and no crossing is needed to make it work. The LED is for the
+  board, where a machine that never starts is otherwise indistinguishable from a machine with no
+  memory.
+
+`k2g_cdc_fifo` turns out to require `DEPTH >= 4` — the full test compares the top two pointer bits,
+so there has to be an address bit under them, and at depth 2 it is a reversed part-select and
+elaboration fails a long way from the instantiation that caused it. Now asserted at the top of the
+module.
+
+**`rtl/tb/k2g_psram_model.sv`** is the behavioural controller, written from the measured table in
+`docs/bring-up.md` rather than from the user guide. It answers, and it also *checks*: the three ways
+to drive this IP wrongly — a command inside the minimum interval, a command into a burst still
+streaming, a command before `init_calib` — all corrupt memory silently on hardware and are all
+errors here. It reproduces the fourth directly instead of checking for it, sampling write data per
+beat, so an adapter that lets `wr_data` move mid-burst writes the wrong bytes exactly as it would on
+the board. It models the contract, not the IP: passing says nothing about whether the real
+controller is configured correctly, which is what the `psram` bring-up stage is for.
+
+**`rtl/tb/tb_psram_adapter.sv`**, 68 checks, and eight new mutants in `mutants.sh` — beat select,
+write-half select, write data held, read-half select, fetch halfword select, response routing,
+command interval, command before calibration. All eight caught.
+
+**Still to do in this phase:** wire it into `k2g_soc` (PLL, controller instance, copier targeting
+PSRAM), move `MEM_BYTES` to 8 MB across `k2g_core.sv`, `k2g_soc.sv`, `tb_cosim.sv` and the emulator
+in one commit since the `ADDR_OUT_OF_RANGE` boundary is architecturally visible, and declare
+`clk_sys` and `clk_out` asynchronous in the `.sdc`.
 
 **Gate:** psram bitstream passes on hardware; `soc` runs `hello` and `fibforever` at `CLK_DIV = 1`;
 cosim green.

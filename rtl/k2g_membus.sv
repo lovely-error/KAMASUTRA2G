@@ -27,6 +27,22 @@
 // which is a real constraint on the Phase 3 design and is written here rather
 // than discovered there.
 //
+// ---- the fetch port is 16 bits wide ----
+//
+// `rsp_data` is 32 bits, but a response to the INSTRUCTION port carries a code
+// point in bits [15:0] and nothing above them. That is not a property of this
+// interface -- it is a property of the fetch port, and it has always been true:
+// `k2g_mem` port A is a halfword port and selects by address bit 1, and
+// `k2g_core` reads `ibus.rsp_data[15:0]` directly.
+//
+// Written down here because it stopped being free. While the only slave was
+// `k2g_bsram_port` over `k2g_mem` the select came for nothing; `k2g_psram` has
+// to carry the request's bit 1 across a clock domain to do the same job, and
+// the Phase 4 I-cache will have to do it too. The alternative -- respond with
+// the word and let the core's fetch unit select, which already keeps
+// `issue_addr` beside every outstanding request -- is tidier and is worth
+// taking when Phase 4 touches both ends anyway.
+//
 // ---- a beat is not a transaction ----
 //
 // This bus deliberately carries ONE BEAT per request. It has no burst length,

@@ -175,6 +175,12 @@ module k2g_cdc_fifo #(
   initial begin
     assert (DEPTH == (1 << AW))
       else $fatal(1, "k2g_cdc_fifo: DEPTH must be a power of two");
+    // The full test compares the top TWO pointer bits, so there has to be an
+    // address bit under them. At DEPTH 2 the expression's `[AW-2:0]` is a
+    // reversed part-select and elaboration fails -- loudly, but a long way
+    // from the instantiation that caused it.
+    assert (DEPTH >= 4)
+      else $fatal(1, "k2g_cdc_fifo: DEPTH must be at least 4");
   end
 
   // Overflow and underflow are silent corruption otherwise: a dropped request
