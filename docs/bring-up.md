@@ -349,9 +349,10 @@ Runs `emu/programs/hello.kasm` by default and should print
 PROG=fib bash rtl/board/build.sh soc
 ```
 
-**Memory is PSRAM as of Phase 3**, and the BSRAM is gone from this design
-entirely — all 26 blocks are free for Phase 4's caches. Three things follow
-that are worth knowing before reading an LED:
+**Memory is PSRAM as of Phase 3.** `k2g_mem`'s four BSRAM blocks are gone, and
+the controller IP takes four of its own, so the total is unchanged at 7 of 26 —
+see the table. Three things follow that are worth knowing before reading an
+LED:
 
 - The machine takes **hundreds of microseconds to start**, waiting for the
   controller to calibrate, and the boot copy itself now takes about 100 µs
@@ -369,11 +370,22 @@ that are worth knowing before reading an LED:
 |---|---|---|
 | Logic | 4412 / 8640 (51%) | **6133 / 8640 (71%)** |
 | Registers | 1155 / 6771 (17%) | **2052 / 6771 (31%)** |
-| BSRAM | 7 / 26 | **0 / 26** |
+| BSRAM | 7 / 26 (4 `k2g_mem` + 3 regfile) | **7 / 26** (4 IP + 3 regfile) |
 | Bitstream | 3.5 MB | 3.5 MB |
 
-The controller IP is most of the growth: about 1300 LUT and 700 registers.
-`k2g_psram` itself measures 362 logic cells and 220 registers on its own.
+The controller IP is most of the growth: the `psram` stage builds the IP with
+almost nothing else and comes to 1540 logic and 839 registers. `k2g_psram`
+itself measures 362 logic cells and 220 registers.
+
+**The register file is still in BSRAM**, three `SDPB` in `k2g_regfile`,
+confirmed in the netlist. It moved there at Phase 2b when registering the uop
+gave synthesis a registered read address, and nothing since has disturbed it —
+none of the logic growth here is the register file falling back to flip-flops,
+which would have cost about 1120 registers and 3700 LUTs on its own.
+
+**The cache budget is 19 blocks, not 26.** Deleting `k2g_mem` freed four and
+the IP took four back. That happens to be the number `docs/v2-plan.md` already
+assumed, but for a different reason than it says.
 
 ### The LEDs are the debugger
 

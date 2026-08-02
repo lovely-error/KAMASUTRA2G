@@ -134,9 +134,12 @@ echo "  bitstream: $FS ($(stat -c%s "$FS") bytes)"
 # Utilization, from the place-and-route report.
 rpt="$WORK/impl/pnr/project.rpt.txt"
 [ -f "$rpt" ] || rpt="$(ls "$WORK"/impl/pnr/*.rpt.txt 2>/dev/null | head -1)"
+# NOT `head -8`. It was, and the PSRAM build added an IOLOGIC row that pushed
+# the BSRAM line off the end -- which was read as "no BSRAM used" and written
+# into two documents before anyone checked the report itself.
 if [ -f "$rpt" ]; then
-    grep -iE 'Logic|Register|BSRAM|SSRAM|DSP|I/O Port|Slice' "$rpt" |
-        grep -iE '[0-9]+/' | head -8 | sed 's/^/  /'
+    grep -iE 'Logic|Register|BSRAM|SSRAM|DSP|I/O Port|Slice|IOLOGIC' "$rpt" |
+        grep -iE '[0-9]+/' | sed 's/^/  /'
 fi
 
 # Timing. This is the number that says whether the clock target is real; the

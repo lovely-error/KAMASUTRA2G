@@ -441,13 +441,25 @@ controller and its reset chain (lifted from the probe, where it was found the ha
 |---|---|---|
 | Logic | 4412 / 8640 (51%) | **6133 / 8640 (71%)** |
 | Registers | 1155 | **2052** |
-| BSRAM | 7 / 26 | **0 / 26** — all of it free for Phase 4 |
+| BSRAM | 7 / 26 | **7 / 26** — see below |
 | `clk_sys` Fmax | 15.58 MHz | **15.56 MHz** against 13.5 |
 | `clk_out` Fmax | — | **68.63 MHz** against 67.5 |
 
-Most of the growth is the IP: ~1300 LUT and ~700 registers. Nine setup and seventeen hold endpoints
-do not close and every one of them is inside the controller, between its own 135 MHz and its user
-clock; the `psram` stage that passes on hardware reports 557 of the same class.
+Most of the growth is the IP: the `psram` stage builds it with almost nothing else and comes to
+1540 logic and 839 registers. Nine setup and seventeen hold endpoints do not close and every one of
+them is inside the controller, between its own 135 MHz and its user clock; the `psram` stage that
+passes on hardware reports 557 of the same class.
+
+**BSRAM did not move.** Deleting `k2g_mem` freed four blocks and the controller IP took four back,
+so the cache budget stays at **19** — which is the number the Risks section already assumed, for a
+different reason than it gives. The register file's three `SDPB` are untouched; none of the logic
+growth is the register file falling out of BSRAM, which would have cost about 1120 registers and
+3700 LUTs on its own.
+
+An earlier version of this table said 0 / 26. `build.sh` truncated its resource listing at eight
+lines and the PSRAM build added an IOLOGIC row that pushed BSRAM off the end; the missing line was
+read as a zero and written into two documents before anyone opened the report. The listing is no
+longer truncated.
 
 **`rtl/tb/tb_soc.sv`** runs the whole SoC against the behavioural controller and an `rPLL` model,
 and checks the substantive thing: every byte of the boot ROM arrives in PSRAM, compared against a
@@ -541,8 +553,10 @@ both machines.
   (`LUT2 ... INIT=4'h8`), so an unwritten register still reads zero. That mask is what the SSRAM
   left in `u_rf` now is.
 
-  Consequences: it is a large part of the 565-LUT drop, and it costs 3 blocks from the cache budget
-  (22 free → 19; the two 8 KB caches need 8). One fragility to keep in mind — the retiming depends
+  Consequences: it is a large part of the 565-LUT drop, and it costs 3 blocks from the cache budget.
+  Still **19 free** after Phase 3 — but the arithmetic underneath changed. It was 26 − 4 for
+  `k2g_mem` − 3 for the register file; it is now 26 − 4 for the PSRAM controller − 3 for the
+  register file. The two 8 KB caches need 8. One fragility to keep in mind — the retiming depends
   on the read address being a clean register output. Forwarding in 2c muxes read *data*, not
   addresses, so it should hold; if a read address ever becomes combinational, expect a silent
   fallback to SSRAM and a different Fmax.
