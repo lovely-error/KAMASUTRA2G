@@ -1,4 +1,4 @@
-; fibforever.kasm -- print Fibonacci numbers forever, one per second.
+; fibforever.kasm -- print Fibonacci numbers forever, one per delay loop.
 ;
 ; Restarts the sequence when the next term would not fit in 32 bits. That is
 ; detected from the ADD's own overflow flag rather than by comparing against a
@@ -18,14 +18,21 @@ UART_DATA = 0x00
 ; Fibonacci sequence.
 MAGIC     = 0xCCCCCCCD
 
-; The delay loop below is three instructions and measures exactly six clock
-; cycles per iteration in simulation. At 6.75 MHz (the 27 MHz crystal divided
-; by four, see k2g_soc.sv) one second is 6750000 cycles.
+; The delay loop below is three instructions, and this constant was tuned once
+; for v1: six clock cycles per iteration at 6.75 MHz, so 6750000 / 6 = 1125000
+; gives one second.
 ;
-;   6750000 / 6 = 1125000
+; IT IS NO LONGER A SECOND, and the constant is deliberately left alone --
+; retuning it would have to happen again after every change to the memory
+; system, and what it actually measures is more useful than what it claims.
+; Measured since:
 ;
-; Retune this if CLK_DIV changes. Printing costs about two milliseconds on top,
-; which is below the resolution anyone will notice.
+;   BSRAM, 13.5 MHz, after the pipeline   9 cycles/iteration    0.75 s
+;   PSRAM, 13.5 MHz, no caches yet       59.4 cycles/iteration  4.95 s
+;
+; The loop touches no data memory, so every one of those cycles is instruction
+; fetch: nine code points per iteration, and over PSRAM each one is its own
+; 128-byte burst. See docs/bring-up.md.
 DELAY     = 1125000
 
 ; ---------------------------------------------------------------------------
@@ -76,7 +83,7 @@ finish:
         tc
 
 ; ---------------------------------------------------------------------------
-; show -- write r3 as unsigned decimal followed by CRLF, then wait one second.
+; show -- write r3 as unsigned decimal followed by CRLF, then run the delay loop.
 ; Clobbers r3, r4, r5, r7, r8, r11. Returns through r30.
 ;
 ; Print and delay are one routine so both call sites get both, and the delay
@@ -127,7 +134,7 @@ emit:
         puc32   r7, 10
         out     r10, r7
 
-        ; ---- one second ----
+        ; ---- the delay loop; see DELAY above for what it costs now ----
         puc32   r11, DELAY
 wait:
         add     r11, -1

@@ -31,7 +31,30 @@ openFPGALoader -b tangnano9k rtl/board/out/soc/impl/pnr/project.fs
 
 **All four stages have run on hardware**, on a Tang Nano 9K over the on-board
 USB serial bridge at 115200 8N1. `fibforever` counts the 32-bit Fibonacci
-sequence a term per second and wraps back to zero after 2971215073.
+sequence and wraps back to zero after 2971215073.
+
+**Its term rate is a clock-speed measurement, not a feature.** The delay is a
+software loop of 1125000 iterations, tuned once for v1: three instructions at
+six cycles each at 6.75 MHz, giving one second. Neither number has held.
+
+| | cycles per iteration | term period | how |
+|---|---|---|---|
+| v1, BSRAM at 6.75 MHz | 6 | 1.00 s | as tuned |
+| after Phase 2, BSRAM at 13.5 MHz | **9** | 0.75 s | measured, `tb_core` |
+| after Phase 3, PSRAM at 13.5 MHz | **59.4** | **4.95 s** | measured, `tb_soc` |
+
+The loop touches no data memory, so every one of those cycles is instruction
+fetch. Measured in the loop: **3 code points per instruction, and 6.6 `clk_sys`
+cycles per bus access** against 1.0 over BSRAM. 6.6 cycles at 13.5 MHz is
+489 ns, which is the PSRAM command interval — 32 `clk_out` cycles at 67.5 MHz
+is 474 ns — plus the clock crossing.
+
+So the slowdown is not the core, the crossing or the adapter being wasteful. It
+is that **there is no instruction cache yet**: every code point is a separate
+128-byte burst of which 124 bytes are discarded, and the discarded part is
+where the next 63 code points were. Phase 4's I-cache line is exactly one
+burst, and this nine-code-point loop fits inside one line, so it should return
+to roughly the 0.75 s row.
 
 **Not yet on hardware: stage 4 with PSRAM as memory.** Everything below the
 line "Memory is PSRAM as of Phase 3" is from simulation and place-and-route
