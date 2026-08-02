@@ -31,9 +31,7 @@ module k2g_core
     // checks that they do.
     //
     // 8 MB is the in-package PSRAM, flat at address 0, which is all of memory
-    // in v2. `k2g_soc` still passes 8192 because the board build still has
-    // only the BSRAM behind it, and a fault boundary beyond the memory that
-    // exists would be a lie the hardware could not keep.
+    // in v2 -- no TCM and no two-region decode.
     parameter int MEM_BYTES = 8 * 1024 * 1024
 ) (
     input  logic        clk,
@@ -125,7 +123,26 @@ module k2g_core
 
   // A pure function of state. Nothing here looks at `req_ready` (rule 3) or at
   // `redirect`, which would drag the data bus's ready into the fetch path.
-  assign ibus.req_valid = !halted_r && (inflight < 3'(F2D_DEPTH));
+  //
+  // `rst_n` IS IN HERE, and it is not defensive tidiness. `halted_r` and
+  // `inflight` are both zero while the core is held, so without it a core in
+  // reset offers a fetch every cycle and a slave that is not in reset accepts
+  // them -- while `issue_wp`, `outstanding` and `inflight` are all pinned at
+  // zero, so the core records none of them. Every one of those requests is a
+  // response the core will receive after release and pair with an
+  // `issue_addr` entry it never wrote, which corrupts `isa` rather than the
+  // code point: wrong fault addresses and wrong branch targets, from
+  // instructions that decode perfectly.
+  //
+  // It was harmless while every slave shared the core's reset and dropped
+  // everything with it -- `k2g_mem_slow` still does. It stopped being true in
+  // `k2g_soc` the moment memory became PSRAM: the boot copier needs the bus
+  // live while the core is still held, so the memory side comes out of reset
+  // first, by the whole length of the copy. `tb_soc` measures it.
+  //
+  // The data port needs no such guard -- `mem_access` requires `uop_valid`,
+  // which comes from the D->X register and is reset with everything else.
+  assign ibus.req_valid = rst_n && !halted_r && (inflight < 3'(F2D_DEPTH));
   assign ibus.req.addr  = pc;
   assign ibus.req.we    = 4'b0000;
   assign ibus.req.wdata = 32'd0;

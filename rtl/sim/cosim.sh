@@ -65,6 +65,11 @@ rm -rf work
 "$QUESTA/vlib.exe" work > /dev/null || exit 1
 
 RTL_WIN="$(cygpath -m "$RTL" 2>/dev/null || echo "$RTL")"
+# Every tb_*.sv is compiled here, including tb_soc, which includes k2g_rom.svh
+# from beside the SoC rather than from rtl/. Only tb_cosim is ever elaborated,
+# so the board modules themselves do not have to be in the source list -- but
+# an unfound `include is a compile error rather than an elaboration one.
+BRD_WIN="$(cygpath -m "$RTL/board" 2>/dev/null || echo "$RTL/board")"
 SOURCES=("$RTL/k2g_pkg.sv" "$RTL/k2g_types.svh")
 for f in "$RTL"/k2g_*.sv; do
     [ "$(basename "$f")" = "k2g_pkg.sv" ] || SOURCES+=("$f")
@@ -73,7 +78,7 @@ done
 SOURCES+=("$RTL"/tb/k2g_*.sv)
 SOURCES+=("$RTL"/tb/tb_*.sv)
 
-if ! "$QUESTA/vlog.exe" -sv -quiet +define+SIMULATION "+incdir+$RTL_WIN" "${SOURCES[@]}" > vlog.log 2>&1 \
+if ! "$QUESTA/vlog.exe" -sv -quiet +define+SIMULATION "+incdir+$RTL_WIN" "+incdir+$BRD_WIN" "${SOURCES[@]}" > vlog.log 2>&1 \
    || grep -qE '^\*\* Error' vlog.log; then
     echo "COMPILE FAILED"
     grep -E '^\*\* Error' vlog.log | head -20

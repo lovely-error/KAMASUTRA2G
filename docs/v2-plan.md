@@ -116,9 +116,11 @@ Measured cost: SoC 4695 → 4670 LUTs, 758 → 772 registers. Free.
 is variable.
 
 **Done:** `rtl/k2g_chan.sv` (channel interface + `k2g_skid`, with `tb_chan`), `rtl/k2g_membus.sv`,
-`rtl/k2g_bsram_port.sv` (synthesizable slave) and `rtl/tb/k2g_mem_slow.sv` (the latency injector).
-The core's **data** port is now a `k2g_membus` master. `LATENCY=40 bash rtl/sim/cosim.sh` produces
-results identical to `LATENCY=0`, across all 22 programs.
+`k2g_bsram_port.sv` (a synthesizable slave over BSRAM, since **deleted** — Phase 3 replaced it with
+`k2g_psram` and nothing in the core changed, which is what the contract was bought for) and
+`rtl/tb/k2g_mem_slow.sv` (the latency injector). The core's **data** port is now a `k2g_membus`
+master. `LATENCY=40 bash rtl/sim/cosim.sh` produces results identical to `LATENCY=0`, across all 22
+programs.
 
 The **instruction** port followed as Phase 2's first step (below); both buses now tolerate
 arbitrary latency.
@@ -343,7 +345,7 @@ The ISA-specific traps, each of which is a real one:
 > The core already tolerates arbitrary latency, so PSRAM without a cache works — slowly — and the
 > machine stays runnable in between.
 
-## Phase 3 — PSRAM
+## Phase 3 — PSRAM 🔶 built and simulated; not yet flashed
 
 - **`rtl/k2g_psram.sv`** — wraps `PSRAM_Memory_Interface_HS_Top` from
   `K2606/src/psram_memory_interface_hs/`: 21-bit address, 64-bit user data, 64-byte bursts,
@@ -427,16 +429,54 @@ controller is configured correctly, which is what the `psram` bring-up stage is 
 write-half select, write data held, read-half select, fetch halfword select, response routing,
 command interval, command before calibration. All eight caught.
 
-**3c done — the address space is 8 MB** everywhere except the SoC, which keeps 8192 until it has
-the memory to justify it. See the `MEM_BYTES` bullet above.
+**3c done — the address space is 8 MB.** See the `MEM_BYTES` bullet above.
 
-**Still to do in this phase:** wire `k2g_psram` into `k2g_soc` — the PLL, the controller instance
-and its own reset chain, the copier writing through the bus instead of straight at `k2g_mem` port
-B, and `MEM_BYTES` following — then declare `clk_sys` and the controller's `clk_out` asynchronous
-in `tangnano9k_soc.sdc`. Both end at a hardware flash rather than at a simulation.
+**3d done — the SoC runs on PSRAM.** `k2g_mem` and its bridge are gone from `k2g_soc` entirely;
+`k2g_bsram_port.sv` is deleted, which is what the bus contract was bought for. The PLL, the
+controller and its reset chain (lifted from the probe, where it was found the hard way) sit beside
+`k2g_psram`, and the boot copier is a bus master advancing on `req_ready` behind
+`k2g_membus_mux` — ownership of the data port, copier during boot and core after.
 
-**Gate:** psram bitstream passes on hardware; `soc` runs `hello` and `fibforever` at `CLK_DIV = 1`;
-cosim green.
+| | before | with PSRAM |
+|---|---|---|
+| Logic | 4412 / 8640 (51%) | **6133 / 8640 (71%)** |
+| Registers | 1155 | **2052** |
+| BSRAM | 7 / 26 | **0 / 26** — all of it free for Phase 4 |
+| `clk_sys` Fmax | 15.58 MHz | **15.56 MHz** against 13.5 |
+| `clk_out` Fmax | — | **68.63 MHz** against 67.5 |
+
+Most of the growth is the IP: ~1300 LUT and ~700 registers. Nine setup and seventeen hold endpoints
+do not close and every one of them is inside the controller, between its own 135 MHz and its user
+clock; the `psram` stage that passes on hardware reports 557 of the same class.
+
+**`rtl/tb/tb_soc.sv`** runs the whole SoC against the behavioural controller and an `rPLL` model,
+and checks the substantive thing: every byte of the boot ROM arrives in PSRAM, compared against a
+second instance of `k2g_rom` so the test does not care which program is loaded. A per-byte write is
+a masked write into one beat of a burst, so 168 of them landing correctly exercises the geometry,
+the mask lanes and the beat phase in the real SoC rather than in a directed test. Three new mutants,
+all caught.
+
+**One core change, and it is a real defect rather than tidiness.** `ibus.req_valid` did not look at
+`rst_n`, so a core held in reset offered a fetch every cycle while `outstanding`, `inflight` and
+`issue_wp` were all pinned at zero — it asked and counted nothing. Harmless while every slave shared
+the core's reset and dropped everything with it; not harmless in `k2g_soc`, where the copier needs
+memory live for 100 µs while the core is held. Measured on the mutant: 167 requests issued during
+reset, 2 still in flight at release, and from then on every answer paired with the wrong
+`issue_addr` entry — valid code points with wrong addresses, so wrong fault addresses and wrong
+branch targets from instructions that decode perfectly. It also stole half the bus, taking the boot
+copy from 104 µs to 186.
+
+Three indirect ways of testing it were tried and all were blind: "answered more often than asked" is
+false at the end of any run because up to four requests are legitimately in flight; comparing the
+testbench's issue/answer difference against the core's own `outstanding` is tautological, both
+counting the same wires; and a "answered with nothing outstanding" assertion inside the core never
+fires, because the core has always just issued something. What works is the property stated
+directly: **a core in reset must not ask the bus for anything.**
+
+**Gate: three of four.** Cosim green, `tb_soc` green, the bitstream builds and meets timing on every
+clock the design owns. The remaining one is a flash: `soc` running `hello` and `fibforever` out of
+PSRAM on the board. `CLK_DIV = 1` is Phase 2's business, not this one — `clk_sys` places at
+15.56 MHz, so 27 MHz still needs the execute/writeback split.
 
 ---
 

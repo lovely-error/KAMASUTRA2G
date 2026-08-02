@@ -18,7 +18,41 @@ create_clock -name clk_27m -period 37.037 -waveform {0 18.5} [get_ports {clk_27m
 // not error -- it reports timing against a clock the design does not have.
 create_clock -name clk_sys -period 74.074 -waveform {0 37.037} [get_nets {div[0]}]
 
-// The two are related by construction, but every path that matters is inside
-// one domain or the other, and treating them as unrelated stops the tool
-// reporting cross-domain paths that never occur.
-set_clock_groups -asynchronous -group [get_clocks {clk_27m}] -group [get_clocks {clk_sys}]
+// The PSRAM controller's user clock: a CLKDIV inside the IP halving the PLL's
+// 135 MHz, so 67.5 MHz.
+//
+// GENERATED, NOT BASE, and the difference is the whole point. The tool derives
+// this clock on its own when nothing declares it -- as
+// `<instance>/u_psram_top/clkdiv/CLKOUT.default_gen_clk` -- but that name
+// cannot be used in `set_clock_groups`, because auto-derivation happens after
+// the constraints are read and `get_clocks` on it fails outright. So it has to
+// be declared to be named, and declaring it with `create_clock` is wrong: a
+// base clock has no master, so the tool stops knowing that this and the
+// 135 MHz it is divided from share a source, and analyses every path between
+// them with an invented 7.4 ns relation and 4.5 ns of skew. That is how a
+// constraint makes a report look better while meaning less -- it raised the
+// reported Fmax from 67.2 to 70.0 MHz and turned fifty IP-internal paths into
+// violations.
+// Declared as a CHAIN from the crystal, because `-source` will only accept a
+// point where a clock has been declared -- the PLL output the tool derives by
+// itself cannot be named here, in `-source` or in `get_clocks`, since
+// auto-derivation happens after these constraints are read. So the PLL's 135
+// MHz is declared too, at the same ratio the tool would have derived (27 x 5),
+// purely so that clk_out has a master to hang from.
+create_generated_clock -name memclk -source [get_ports {clk_27m}] -multiply_by 5 [get_nets {memory_clk}]
+create_generated_clock -name clk_out -source [get_nets {memory_clk}] -divide_by 2 [get_nets {psram_clk_out}]
+
+// This line is load-bearing rather than tidy. The core and the controller are
+// two PLL paths with nothing holding them in phase, so every path between them
+// is a real clock-domain crossing -- and they all go through k2g_cdc_fifo,
+// whose two synchronizer flops are the only thing making them safe. Without it
+// the tool tries to close timing on paths that can never be met, and may
+// report success at something meaningless.
+//
+// docs/v2-plan.md calls this out as the one thing cosimulation cannot check:
+// metastability does not exist in a zero-delay simulator, so nothing in
+// rtl/sim/ will ever notice if this line is missing.
+//
+// ONE LINE. Gowin's SDC parser does not accept a backslash continuation -- it
+// reports `syntax error near token '\'` and the build stops.
+set_clock_groups -asynchronous -group [get_clocks {clk_27m}] -group [get_clocks {clk_sys}] -group [get_clocks {memclk clk_out}]

@@ -195,6 +195,30 @@ k2g_psram.sv
 detect
 tb_psram_adapter
 run
+--
+core-fetches-while-held-in-reset
+k2g_core.sv
+  assign ibus.req_valid = rst_n && !halted_r && (inflight < 3'(F2D_DEPTH));
+  assign ibus.req_valid = !halted_r && (inflight < 3'(F2D_DEPTH));
+detect
+tb_soc
+run
+--
+copier-ignores-backpressure
+board/k2g_soc.sv
+    end else if (booting && cbus.req_ready) begin
+    end else if (booting) begin
+detect
+tb_soc
+run
+--
+bus-mux-ignores-select
+k2g_membus_mux.sv
+  assign down.req_valid = sel ? up_b.req_valid : up_a.req_valid;
+  assign down.req_valid = up_b.req_valid;
+detect
+tb_soc
+run
 EOF
 
 # ---- runner ------------------------------------------------------------
@@ -226,7 +250,9 @@ reset_scratch() {
     cp -r "$RTL/tb" "$SCRATCH/rtl/tb"
     cp "$RTL"/sim/*.sh "$SCRATCH/rtl/sim/"
     mkdir -p "$SCRATCH/rtl/board"
-    cp "$RTL"/board/k2g_uart.sv "$SCRATCH/rtl/board/" 2>/dev/null
+    # The board sources run.sh compiles -- the UART, the PLL, the generated ROM
+    # and the SoC itself. Not the other tops, which are pins and LEDs.
+    cp "$RTL"/board/*.sv "$RTL"/board/*.svh "$SCRATCH/rtl/board/" 2>/dev/null
 }
 
 run_case() {

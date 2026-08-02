@@ -55,10 +55,13 @@ for f in "$RTL"/k2g_*.sv; do
     esac
 done
 for f in "$RTL"/board/k2g_*.sv; do
-    # The board-level tops instantiate pins and are not simulated here; only
-    # the reusable blocks (the UART) are.
+    # Most board-level tops are pins and LEDs and are not simulated here. The
+    # SoC is, because it is where the copier, the bus mux and the PSRAM adapter
+    # first meet -- and the only alternative to simulating that is flashing it.
+    # It needs the PLL and the generated ROM with it; the Gowin primitives they
+    # bottom out in are modelled in rtl/tb (k2g_rpll_model, k2g_psram_model).
     case "$(basename "$f")" in
-        k2g_uart.sv) SOURCES+=("$f") ;;
+        k2g_uart.sv|k2g_pll.sv|k2g_rom.sv|k2g_soc.sv) SOURCES+=("$f") ;;
         *) ;;
     esac
 done
@@ -78,9 +81,11 @@ done
 # Questa is a Windows binary, so +incdir+ needs a Windows-style path even
 # when this script runs under git bash.
 RTL_WIN="$(cygpath -m "$RTL" 2>/dev/null || echo "$RTL")"
+# k2g_soc includes k2g_rom.svh, which lives beside it rather than in rtl/.
+BRD_WIN="$(cygpath -m "$RTL/board" 2>/dev/null || echo "$RTL/board")"
 
 log="$WORK/vlog.log"
-if ! "$VLOG" -sv -quiet +define+SIMULATION "+incdir+$RTL_WIN" "${SOURCES[@]}" > "$log" 2>&1; then
+if ! "$VLOG" -sv -quiet +define+SIMULATION "+incdir+$RTL_WIN" "+incdir+$BRD_WIN" "${SOURCES[@]}" > "$log" 2>&1; then
     echo "COMPILE FAILED"
     grep -E '^\*\* (Error|Fatal)' "$log" | head -20
     exit 1

@@ -35,10 +35,10 @@
 // `k2g_mem` port A is a halfword port and selects by address bit 1, and
 // `k2g_core` reads `ibus.rsp_data[15:0]` directly.
 //
-// Written down here because it stopped being free. While the only slave was
-// `k2g_bsram_port` over `k2g_mem` the select came for nothing; `k2g_psram` has
-// to carry the request's bit 1 across a clock domain to do the same job, and
-// the Phase 4 I-cache will have to do it too. The alternative -- respond with
+// Written down here because it stopped being free. While the only slave was a
+// thin bridge over `k2g_mem` the select came for nothing; `k2g_psram` has to
+// carry the request's bit 1 across a clock domain to do the same job, and the
+// Phase 4 I-cache will have to do it too. The alternative -- respond with
 // the word and let the core's fetch unit select, which already keeps
 // `issue_addr` beside every outstanding request -- is tidier and is worth
 // taking when Phase 4 touches both ends anyway.

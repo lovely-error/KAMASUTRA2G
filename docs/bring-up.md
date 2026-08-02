@@ -33,6 +33,10 @@ openFPGALoader -b tangnano9k rtl/board/out/soc/impl/pnr/project.fs
 USB serial bridge at 115200 8N1. `fibforever` counts the 32-bit Fibonacci
 sequence a term per second and wraps back to zero after 2971215073.
 
+**Not yet on hardware: stage 4 with PSRAM as memory.** Everything below the
+line "Memory is PSRAM as of Phase 3" is from simulation and place-and-route
+only. The stage last *ran* on a board with 8 KB of BSRAM behind it.
+
 Utilization and timing figures below come from place-and-route reports; the
 behaviour is observed.
 
@@ -255,8 +259,12 @@ Two ways to resolve it, and the second is better:
    what drove the clock down in the first place.
 2. **Regenerate the IP for a lower Memory Clock.** Everything else unchanged:
    `W955D8MBYA`, 1 channel, Psram Width 8, Dq Width 16, Addr Width 21, Burst
-   Mode 64, Fixed Latency. At 135 MHz the user clock is 67.5 and the probe has
-   11.5% margin, already measured. Lower still — 108, for a 54 MHz user clock
+   Mode 64, Fixed Latency. At 135 MHz the user clock is 67.5 MHz. An earlier
+   version of this line claimed 11.5% margin there; the place-and-route report
+   for the `psram` stage says **67.196 MHz against a 67.500 requirement**, so
+   the probe does not quite close on that clock and never did. It works on
+   hardware anyway. The `soc` build reports 68.63 MHz for the same clock, under
+   a constraint set that names the PLL output as well — see stage 4. Lower still — 108, for a 54 MHz user clock
    — costs nothing that matters: a 13.5 MHz core wants about 0.4 Gbit/s and
    even 54 MHz × 64 bits is 3.4.
 
@@ -331,7 +339,7 @@ suspect** — 162 MHz is `FBDIV_SEL=5, ODIV_SEL=4` in `k2g_pll.sv`.
 ## Stage 4 — the full machine
 
 ```
-boot ROM -> copier -> 8 KB unified memory -> K2G core -> UART
+boot ROM -> copier -> 8 MB in-package PSRAM -> K2G core -> UART
 ```
 
 Runs `emu/programs/hello.kasm` by default and should print
@@ -341,12 +349,31 @@ Runs `emu/programs/hello.kasm` by default and should print
 PROG=fib bash rtl/board/build.sh soc
 ```
 
-| | |
-|---|---|
-| Logic | 4695 / 8640 (55%) |
-| Registers | 758 / 6480 (12%) |
-| BSRAM | 4 / 26 (16%) |
-| Bitstream | 3.5 MB |
+**Memory is PSRAM as of Phase 3**, and the BSRAM is gone from this design
+entirely — all 26 blocks are free for Phase 4's caches. Three things follow
+that are worth knowing before reading an LED:
+
+- The machine takes **hundreds of microseconds to start**, waiting for the
+  controller to calibrate, and the boot copy itself now takes about 100 µs
+  rather than 168 cycles: a byte write to PSRAM is a whole 128-byte burst.
+  Both are invisible to a human.
+- **PSRAM does not power up as zeros.** The BSRAM did. A program that reads a
+  location it never wrote used to get 0 and now gets whatever was there.
+  Nothing in `emu/programs/` does, but a program that behaves differently here
+  than under cosimulation should be suspected of it first.
+- The core and the memory are **two clock domains**, crossed only inside
+  `k2g_psram` through `k2g_cdc_fifo`. `tangnano9k_soc.sdc` declares them
+  asynchronous; nothing in simulation can check that.
+
+| | before PSRAM | with PSRAM |
+|---|---|---|
+| Logic | 4412 / 8640 (51%) | **6133 / 8640 (71%)** |
+| Registers | 1155 / 6771 (17%) | **2052 / 6771 (31%)** |
+| BSRAM | 7 / 26 | **0 / 26** |
+| Bitstream | 3.5 MB | 3.5 MB |
+
+The controller IP is most of the growth: about 1300 LUT and 700 registers.
+`k2g_psram` itself measures 362 logic cells and 220 registers on its own.
 
 ### The LEDs are the debugger
 
@@ -355,12 +382,17 @@ cause (spec §8), so the LEDs carry it instead. Active low, so a lit LED is a 1.
 
 | Pattern | Meaning |
 |---|---|
-| all six lit, briefly | boot copier running |
+| LED5 blinking, LED0 lit, nothing else | **PSRAM has not calibrated** — see stage 3 |
+| all six lit | boot copier running |
 | LED5 blinking, LED0-4 from `GPIO_OUT` | running normally |
 | `100000` | clean `HALT` |
 | `1cccccc` — top bit set, low five the cause | faulted; cause per spec §8 |
 
 So `1` followed by `00110` is cause 0x06, `MISALIGNED_LOAD`.
+
+The first row is deliberately unlike the others: it is the one failure that is
+about the board rather than the program, and a machine that never starts is
+otherwise indistinguishable from a machine with no memory.
 
 ## Timing
 
@@ -371,9 +403,55 @@ runs on a divided clock. It is now a divide-by-**2** at **13.5 MHz**.
 |---|---|---|---|
 | v1, single-cycle execute | 6.75 MHz | 10.0 MHz | 28 |
 | after Phase 2b, decode split out | **13.5 MHz** | **16.3 MHz** | **13** |
+| after Phase 3, memory is PSRAM | **13.5 MHz** | **15.56 MHz** | 26 |
 
-Zero negative slack, about 21% margin, and **observed running on hardware** at
-13.5 MHz after a rebuild and reflash.
+**Observed running on hardware** at 13.5 MHz after a rebuild and reflash, from
+the Phase 2b build.
+
+### Three clocks, and what does and does not close
+
+Phase 3 added the memory domain. The design's own clocks all meet:
+
+| Clock | Constraint | Actual Fmax | Logic levels |
+|---|---|---|---|
+| `clk_27m` | 27.000 MHz | 104.8 MHz | 5 |
+| `clk_sys` | 13.500 MHz | 15.56 MHz | 26 |
+| `clk_out` (PSRAM user side) | 67.500 MHz | 68.63 MHz | 8 |
+
+`clk_out` has 1.7% margin, which is thin. It is the number to watch if Phase 4
+puts cache logic in that domain — the plan keeps the caches in `clk_sys`
+partly for this reason.
+
+**Nine setup and seventeen hold endpoints do not close, and all of them are
+inside the IP** — the DLL's step signals and the SERDES `CALIB` pins, on paths
+between the controller's own 135 MHz and its 67.5 MHz user clock. None touch
+the core, the adapter or the CDC FIFOs. The `psram` stage, which passes on
+hardware, reports **557** violated endpoints of the same class, so this is
+pre-existing to anything in this repository.
+
+### Constraining the PSRAM user clock, which is easy to get wrong
+
+`clk_out` comes from a `CLKDIV` inside the IP. Three things had to be
+discovered by building:
+
+- The tool derives it correctly by itself, as
+  `<instance>/u_psram_top/clkdiv/CLKOUT.default_gen_clk` — but **that name
+  cannot be used in `set_clock_groups`**. Auto-derivation happens after the
+  constraints are read, so `get_clocks` on it fails with "Cannot get clock with
+  name". It has to be declared to be named.
+- Declaring it with **`create_clock` is wrong**. A base clock has no master, so
+  the tool stops knowing that this clock and the 135 MHz it is divided from
+  share a source, and analyses every path between them with an invented 7.4 ns
+  relation and 4.5 ns of skew. The reported Fmax *rose* from 67.2 to 70.0 MHz
+  and fifty IP-internal paths became violations — a constraint that made the
+  report look better while meaning less.
+- `create_generated_clock -source` will only accept a point where a clock has
+  already been declared, which the PLL output is not. So the PLL's 135 MHz is
+  declared too, at the ratio the tool would have derived, purely to give
+  `clk_out` a master to hang from.
+
+And Gowin's SDC parser does **not** accept a backslash line continuation:
+`syntax error near token ''`, and the build stops.
 
 v1's 28-level path was the whole single-cycle execute chain — fetch → decode →
 register read → ALU → writeback, all combinational within one cycle. Giving

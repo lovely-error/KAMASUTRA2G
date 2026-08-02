@@ -92,10 +92,10 @@ module k2g_mem_slow #(
   //
   // It used to be a state, which made `req_ready` false every other cycle and
   // capped the bus at half a request per cycle. That is strictly worse than
-  // the k2g_bsram_port it stands in for, which ties `req_ready` high and is
-  // fully pipelined -- so simulation was starving the core in a way hardware
-  // does not, and every cycles-per-instruction figure measured from here was
-  // measuring this model.
+  // the synthesizable bridge it stood in for, which tied `req_ready` high and
+  // was fully pipelined -- so simulation was starving the core in a way
+  // hardware does not, and every cycles-per-instruction figure measured from
+  // here was measuring this model.
   logic rsp_q;
 
   always_ff @(posedge clk) begin

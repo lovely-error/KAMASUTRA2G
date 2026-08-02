@@ -3,11 +3,13 @@
 #
 #   bash rtl/board/build.sh blink       # stage 1: LEDs only
 #   bash rtl/board/build.sh loopback    # stage 2: UART echo, no CPU
-#   bash rtl/board/build.sh soc         # stage 3: the whole machine
+#   bash rtl/board/build.sh psram       # stage 3: PLL, PSRAM controller, calibration
+#   bash rtl/board/build.sh soc         # stage 4: the whole machine
 #
 # Staged deliberately. If the board misbehaves, the stage that fails says which
 # layer is at fault: blink means toolchain/pinout/clock, loopback means UART
-# pins or baud rate, soc means the CPU or the memory image.
+# pins or baud rate, psram means the memory or its PLL, soc means the CPU or
+# the memory image.
 #
 # Flash with (openFPGALoader, or the Gowin programmer GUI):
 #   openFPGALoader -b tangnano9k rtl/board/out/<stage>/impl/pnr/project.fs
@@ -53,7 +55,12 @@ case "$STAGE" in
         for f in "$RTL"/k2g_*.sv; do
             [ "$(basename "$f")" = "k2g_pkg.sv" ] || SRC+=("$f")
         done
-        SRC+=("$HERE/k2g_uart.sv" "$HERE/k2g_rom.sv" "$HERE/k2g_soc.sv")
+        # The PLL and the PSRAM controller come with the SoC now: memory is the
+        # in-package PSRAM rather than BSRAM, so the same IP the `psram` stage
+        # proves is part of the machine.
+        SRC+=("$HERE/k2g_uart.sv" "$HERE/k2g_rom.sv" "$HERE/k2g_pll.sv"
+              "$HERE/k2g_soc.sv"
+              "$ROOT/K2606/src/psram_memory_interface_hs/psram_memory_interface_hs.v")
         ;;
     *) echo "unknown stage '$STAGE' (blink | loopback | psram | soc)" >&2; exit 1 ;;
 esac
@@ -134,20 +141,41 @@ fi
 
 # Timing. This is the number that says whether the clock target is real; the
 # simulation and cosimulation say nothing about it.
-tim="$(ls "$WORK"/impl/pnr/*.tr.html "$WORK"/impl/pnr/*timing*.html 2>/dev/null | head -1)"
+#
+# From project_tr_content.html, NOT project.tr.html -- the latter is only a
+# frameset, so the pattern that used to be matched against it never matched
+# anything and every build silently reported no timing at all.
+tim="$WORK/impl/pnr/project_tr_content.html"
 if [ -f "$tim" ]; then
     python - "$tim" <<'PYEND' || true
 import html, re, sys
+
 t = open(sys.argv[1], encoding='utf-8', errors='replace').read()
-txt = html.unescape(re.sub('<[^>]*>', ' ', t))
-m = re.search(r'Max\s*Freq[^0-9]*([0-9.]+)\s*MHz', txt, re.I)
-if m:
-    print(f"  Fmax: {m.group(1)} MHz")
-for label in ("Setup", "Hold"):
-    m = re.search(label + r'[^0-9-]*(-?[0-9.]+)\s*ns', txt, re.I)
-    if m:
-        slack = float(m.group(1))
-        print(f"  {label} slack: {slack} ns" + ("  <-- VIOLATED" if slack < 0 else ""))
+rows = []
+for r in re.findall(r'<tr.*?</tr>', t, re.S):
+    cells = [html.unescape(re.sub('<[^>]*>', '', c)).strip().replace(' ', '')
+             for c in re.findall(r'<t[dh].*?</t[dh]>', r, re.S)]
+    rows.append([c for c in cells if c])
+
+# Per-clock Fmax against its constraint, then how much did not close.
+show = False
+for cells in rows:
+    line = ' | '.join(cells)
+    if 'Constraint' in line and 'Actual Fmax' in line:
+        show = True
+        continue
+    if show:
+        if len(cells) >= 4 and '(MHz)' in cells[2]:
+            want = float(cells[2].split('(')[0])
+            got = float(cells[3].split('(')[0])
+            flag = '  <-- VIOLATED' if got < want else ''
+            print(f"  {cells[1]:<12} {got:>9.3f} MHz against {want:.3f}, "
+                  f"{cells[4]} levels{flag}")
+        else:
+            show = False
+for cells in rows:
+    if len(cells) == 2 and 'Violated Endpoints' in cells[0]:
+        print(f"  {cells[0]}: {cells[1]}")
 PYEND
 fi
 echo "  full log: $WORK/build.log"
