@@ -56,9 +56,9 @@ where the next 63 code points were. Phase 4's I-cache line is exactly one
 burst, and this nine-code-point loop fits inside one line, so it should return
 to roughly the 0.75 s row.
 
-**Not yet on hardware: stage 4 with PSRAM as memory.** Everything below the
-line "Memory is PSRAM as of Phase 3" is from simulation and place-and-route
-only. The stage last *ran* on a board with 8 KB of BSRAM behind it.
+**Stage 4 has run with PSRAM as memory**, executing `fibforever` out of the
+in-package PSRAM and printing the sequence correctly. `hello` has not been
+flashed since the change.
 
 Utilization and timing figures below come from place-and-route reports; the
 behaviour is observed.

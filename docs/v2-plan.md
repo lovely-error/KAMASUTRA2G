@@ -345,7 +345,7 @@ The ISA-specific traps, each of which is a real one:
 > The core already tolerates arbitrary latency, so PSRAM without a cache works — slowly — and the
 > machine stays runnable in between.
 
-## Phase 3 — PSRAM 🔶 built and simulated; not yet flashed
+## Phase 3 — PSRAM ✅ done
 
 - **`rtl/k2g_psram.sv`** — wraps `PSRAM_Memory_Interface_HS_Top` from
   `K2606/src/psram_memory_interface_hs/`: 21-bit address, 64-bit user data, 64-byte bursts,
@@ -485,10 +485,20 @@ counting the same wires; and a "answered with nothing outstanding" assertion ins
 fires, because the core has always just issued something. What works is the property stated
 directly: **a core in reset must not ask the bus for anything.**
 
-**Gate: three of four.** Cosim green, `tb_soc` green, the bitstream builds and meets timing on every
-clock the design owns. The remaining one is a flash: `soc` running `hello` and `fibforever` out of
-PSRAM on the board. `CLK_DIV = 1` is Phase 2's business, not this one — `clk_sys` places at
-15.56 MHz, so 27 MHz still needs the execute/writeback split.
+**Gate: met.** Cosim green, `tb_soc` green, the bitstream builds and meets timing on every clock the
+design owns, and **`fibforever` runs on the board out of PSRAM**, printing the sequence correctly.
+`hello` has not been reflashed since.
+
+`CLK_DIV = 1` was in this phase's gate as originally written and does not belong there — `clk_sys`
+places at 15.56 MHz, so 27 MHz still needs Phase 2's execute/writeback split, which is not a PSRAM
+question.
+
+**The machine is about 6.6x slower than before**, and that is the expected shape of it rather than a
+defect. Measured in `fibforever`'s delay loop, which touches no data memory: 3 code points per
+instruction and **6.6 `clk_sys` cycles per bus access, against 1.0 over BSRAM**. 6.6 cycles at
+13.5 MHz is 489 ns — the PSRAM command interval plus the crossing. Every code point is its own
+128-byte burst of which 124 bytes are discarded, and the discarded part is where the next 63 code
+points were. That is what Phase 4 is for.
 
 ---
 
