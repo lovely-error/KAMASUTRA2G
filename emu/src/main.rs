@@ -15,7 +15,11 @@ use emu::devices::{Devices, UartIo};
 use emu::fault::StopReason;
 use emu::interp::Interpreter;
 
-const DEFAULT_MEM: usize = 64 * 1024;
+/// The v2 machine's address space: 8 MB of PSRAM, flat at 0. This is only the
+/// standalone runner's default -- the cosimulation gets its size from the RTL
+/// through `k2g_dpi_init`, which is what keeps the fault boundary identical on
+/// both machines.
+const DEFAULT_MEM: usize = 8 * 1024 * 1024;
 const DEFAULT_STEPS: u64 = 100_000_000;
 
 fn usage() -> ExitCode {

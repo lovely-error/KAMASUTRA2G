@@ -47,7 +47,17 @@ module tb_cosim
   import "DPI-C" function int unsigned k2g_dpi_uart_len();
   import "DPI-C" function int unsigned k2g_dpi_uart_at(input int unsigned i);
 
-  localparam int MEM_BYTES = 8192;
+  // The v2 address space: 8 MB of PSRAM, flat at 0. It is the fault boundary,
+  // so the emulator is initialized from this same number (k2g_dpi_init below)
+  // and the two cannot drift.
+  //
+  // The behavioural `k2g_mem` behind the bus really is eight megabytes here,
+  // rather than a small array with the boundary set high. Measured: the full
+  // sweep goes from 63 to 76 seconds, which is worth it -- a short array with
+  // a distant boundary aliases in the RTL and reads zero in the emulator, so
+  // any access above the array is a divergence with no cause visible in either
+  // machine.
+  localparam int MEM_BYTES = 8 * 1024 * 1024;
 
   logic clk = 0;
   logic rst_n = 0;

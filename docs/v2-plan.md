@@ -358,7 +358,14 @@ The ISA-specific traps, each of which is a real one:
   initialize memory from `$readmemh`. The copier targets PSRAM and waits for `init_calib`.
 - **`MEM_BYTES` becomes 8 MB** in `k2g_core.sv`, `k2g_soc.sv`, `tb_cosim.sv` and the emulator. That
   moves the `ADDR_OUT_OF_RANGE` boundary, which is architecturally visible, so both move in one
-  commit.
+  commit. **Done, except `k2g_soc.sv`** — the emulator takes its size from the RTL through
+  `k2g_dpi_init`, so the two cannot drift; the SoC keeps 8192 until `k2g_psram` is wired in, because
+  a fault boundary beyond the memory that exists is a lie the board cannot keep.
+
+  The behavioural memory in cosim really is eight megabytes, rather than a small array with the
+  boundary set high. Measured: the sweep goes 63 → 76 seconds. Worth it — a short array with a
+  distant boundary aliases in the RTL and reads zero in the emulator, so any access above the array
+  is a divergence with no cause visible in either machine.
 - Add a **`psram` bring-up stage** to `rtl/board/build.sh` and `docs/bring-up.md`, between
   `loopback` and `soc`. The staged structure exists so a failure says which layer is at fault; a
   new layer earns a new stage.
@@ -420,10 +427,13 @@ controller is configured correctly, which is what the `psram` bring-up stage is 
 write-half select, write data held, read-half select, fetch halfword select, response routing,
 command interval, command before calibration. All eight caught.
 
-**Still to do in this phase:** wire it into `k2g_soc` (PLL, controller instance, copier targeting
-PSRAM), move `MEM_BYTES` to 8 MB across `k2g_core.sv`, `k2g_soc.sv`, `tb_cosim.sv` and the emulator
-in one commit since the `ADDR_OUT_OF_RANGE` boundary is architecturally visible, and declare
-`clk_sys` and `clk_out` asynchronous in the `.sdc`.
+**3c done — the address space is 8 MB** everywhere except the SoC, which keeps 8192 until it has
+the memory to justify it. See the `MEM_BYTES` bullet above.
+
+**Still to do in this phase:** wire `k2g_psram` into `k2g_soc` — the PLL, the controller instance
+and its own reset chain, the copier writing through the bus instead of straight at `k2g_mem` port
+B, and `MEM_BYTES` following — then declare `clk_sys` and the controller's `clk_out` asynchronous
+in `tangnano9k_soc.sdc`. Both end at a hardware flash rather than at a simulation.
 
 **Gate:** psram bitstream passes on hardware; `soc` runs `hello` and `fibforever` at `CLK_DIV = 1`;
 cosim green.

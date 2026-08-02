@@ -25,7 +25,16 @@ module k2g_core
   import k2g_pkg::*;
   import k2g_types::*;
 #(
-    parameter int MEM_BYTES = 8192
+    // The size of the address space, which is architecture rather than
+    // configuration: it is where ADDR_OUT_OF_RANGE begins (spec 8), so the
+    // emulator has to agree with it exactly and the cosimulation is what
+    // checks that they do.
+    //
+    // 8 MB is the in-package PSRAM, flat at address 0, which is all of memory
+    // in v2. `k2g_soc` still passes 8192 because the board build still has
+    // only the BSRAM behind it, and a fault boundary beyond the memory that
+    // exists would be a lie the hardware could not keep.
+    parameter int MEM_BYTES = 8 * 1024 * 1024
 ) (
     input  logic        clk,
     input  logic        rst_n,

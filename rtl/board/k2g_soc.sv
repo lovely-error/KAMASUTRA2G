@@ -18,6 +18,12 @@ module k2g_soc
   import k2g_pkg::*;
   import k2g_types::*;
 #(
+    // Still 8 KB, while `k2g_core`'s default and the cosimulation have moved
+    // to the 8 MB of PSRAM that v2 targets. This is the one place the number
+    // describes a board rather than an architecture: MEM_BYTES is where
+    // ADDR_OUT_OF_RANGE begins, and until the PSRAM adapter is wired in below
+    // there is nothing behind an address above 8192 to fault about. It moves
+    // when `k2g_mem` here is replaced by `k2g_psram`.
     parameter int MEM_BYTES = 8192,
     parameter int XTAL_HZ   = 27_000_000,
     // The core runs on a divided crystal because its execute path has never

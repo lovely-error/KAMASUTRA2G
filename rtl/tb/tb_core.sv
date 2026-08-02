@@ -11,7 +11,8 @@ module tb_core
   import k2g_types::*;
 ;
 
-  localparam int MEM_BYTES = 8192;
+  // The v2 address space, matching tb_cosim and k2g_core's default.
+  localparam int MEM_BYTES = 8 * 1024 * 1024;
 
   logic clk = 0;
   logic rst_n = 0;
