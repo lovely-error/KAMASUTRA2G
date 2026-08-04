@@ -26,6 +26,17 @@ struct Dpi {
 	mem_bytes: usize,
 	interp: Option<Interpreter>,
 	stopped: Option<StopReason>,
+	/// The image as loaded, snapshotted at reset.
+	///
+	/// Memory is the one piece of architectural state the cosimulation never
+	/// compared, so a store the RTL made and the emulator did not was invisible
+	/// -- and so was the reverse. Comparing all 8 MB per instruction is not
+	/// affordable, but diffing against the image at the *stop* is: the words
+	/// that differ from it are exactly the ones this run wrote, and there are
+	/// never many.
+	pristine: Box<[u16]>,
+	/// Word addresses that differ from `pristine`, computed on demand.
+	dirty: Vec<u32>,
 }
 
 static mut DPI: Option<Dpi> = None;
@@ -45,6 +56,8 @@ pub extern "C" fn k2g_dpi_init(mem_bytes: u32) {
 		mem_bytes: bytes,
 		interp: None,
 		stopped: None,
+		pristine: vec![0u16; bytes.div_ceil(2)].into_boxed_slice(),
+		dirty: Vec::new(),
 	};
 	unsafe { *(&raw mut DPI) = Some(dpi) };
 }
@@ -71,6 +84,45 @@ pub extern "C" fn k2g_dpi_reset(entry: u32) {
 	interp.ip = entry;
 	d.interp = Some(interp);
 	d.stopped = None;
+	// The image is fully loaded by now, so this is the baseline every later
+	// memory comparison is against.
+	d.pristine.copy_from_slice(&d.mem);
+	d.dirty.clear();
+}
+
+/// Recomputes which 32-bit words differ from the loaded image, and returns how
+/// many. Call before `k2g_dpi_mem_dirty_addr`.
+#[unsafe(no_mangle)]
+pub extern "C" fn k2g_dpi_mem_dirty_count() -> u32 {
+	let d = dpi();
+	d.dirty.clear();
+	for w in 0..(d.mem.len() / 2) {
+		let i = w * 2;
+		if d.mem[i] != d.pristine[i] || d.mem[i + 1] != d.pristine[i + 1] {
+			d.dirty.push((w * 4) as u32);
+		}
+	}
+	d.dirty.len() as u32
+}
+
+/// Byte address of the `i`-th word that differs from the loaded image.
+#[unsafe(no_mangle)]
+pub extern "C" fn k2g_dpi_mem_dirty_addr(i: u32) -> u32 {
+	let d = dpi();
+	d.dirty.get(i as usize).copied().unwrap_or(0)
+}
+
+/// Reads one aligned 32-bit word of the emulator's memory.
+#[unsafe(no_mangle)]
+pub extern "C" fn k2g_dpi_mem_read32(addr: u32) -> u32 {
+	let d = dpi();
+	let a = addr as usize;
+	if a + 4 > d.mem_bytes {
+		return 0;
+	}
+	let lo = d.mem[a / 2] as u32;
+	let hi = d.mem[a / 2 + 1] as u32;
+	(hi << 16) | lo
 }
 
 /// Executes one instruction.

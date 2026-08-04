@@ -46,6 +46,9 @@ module tb_cosim
   import "DPI-C" function int unsigned k2g_dpi_get_fault_cause();
   import "DPI-C" function int unsigned k2g_dpi_get_fault_addr();
   import "DPI-C" function int unsigned k2g_dpi_get_fault_info();
+  import "DPI-C" function int unsigned k2g_dpi_mem_dirty_count();
+  import "DPI-C" function int unsigned k2g_dpi_mem_dirty_addr(input int unsigned i);
+  import "DPI-C" function int unsigned k2g_dpi_mem_read32(input int unsigned addr);
   import "DPI-C" function int unsigned k2g_dpi_uart_len();
   import "DPI-C" function int unsigned k2g_dpi_uart_at(input int unsigned i);
 
@@ -120,6 +123,17 @@ module tb_cosim
       .b_wdata    (dmem_wdata),
       .b_rdata    (dmem_rdata)
   );
+
+  // Every word the data port writes, so the memory comparison at the end has a
+  // set to walk rather than 2M words to scan. The emulator's side of that set
+  // comes from diffing its memory against the image it was handed, so the two
+  // together cover a store either machine made and the other did not.
+  bit rtl_written [int];
+  always_ff @(posedge clk) begin
+    if (rst_n && dmem_en && (dmem_we != 4'b0000)) begin
+      rtl_written[int'(dmem_addr) >> 2] = 1'b1;
+    end
+  end
 
   k2g_mem #(.BYTES(MEM_BYTES)) mem (
       .clk(clk), .a_addr(imem_addr), .a_en(imem_en), .a_data(imem_data),
@@ -419,6 +433,40 @@ module tb_cosim
                    i, rtl_uart[i], k2g_dpi_uart_at(i));
           errors++;
           break;
+        end
+      end
+    end
+
+    // Memory, which nothing compared until now. A store is not visible in any
+    // register, so a core that faults AND stores -- or that suppresses a store
+    // it should have made -- passed every other check here. Removing the
+    // reserved-tag gate from `mem_access` in k2g_core.sv left f32_store green,
+    // which is what this closes.
+    //
+    // Compared once, at the stop, over the union of the two write sets rather
+    // than per instruction over the whole 8 MB. Memory divergence persists --
+    // unlike a register, nothing overwrites it back into agreement -- so
+    // checking at the end loses nothing but the instruction number.
+    begin
+      int unsigned n_dirty;
+      int unsigned addr;
+      bit          seen [int];
+      int unsigned rtl_word;
+
+      n_dirty = k2g_dpi_mem_dirty_count();
+      for (int unsigned i = 0; i < n_dirty; i++) begin
+        seen[int'(k2g_dpi_mem_dirty_addr(i)) >> 2] = 1'b1;
+      end
+      foreach (rtl_written[idx]) seen[idx] = 1'b1;
+
+      foreach (seen[idx]) begin
+        addr     = int'(unsigned'(idx)) << 2;
+        rtl_word = {mem.lane3[idx], mem.lane2[idx], mem.lane1[idx], mem.lane0[idx]};
+        checks++;
+        if (rtl_word !== k2g_dpi_mem_read32(addr)) begin
+          $display("TB_FAIL: memory at %08x differs: RTL=%08x emulator=%08x",
+                   addr, rtl_word, k2g_dpi_mem_read32(addr));
+          errors++;
         end
       end
     end

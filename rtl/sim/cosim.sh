@@ -6,6 +6,11 @@
 # pairs, and the jump latch. Roughly 1200 bits per instruction, versus the
 # couple of dozen output bytes a program's UART traffic checks.
 #
+# Memory is compared once, at the stop, over the words either machine wrote.
+# It went unchecked for a long time, and a store is invisible in every register
+# -- so a core that faulted AND stored, or that suppressed a store it should
+# have made, passed everything else.
+#
 #   bash rtl/sim/cosim.sh                 # shipped programs + 20 random seeds
 #   bash rtl/sim/cosim.sh 5               # shipped programs + 5 random seeds
 #   bash rtl/sim/cosim.sh 0 hello.bin     # one specific image

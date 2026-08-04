@@ -148,6 +148,22 @@ detect
 f32_csp
 cosim1
 --
+core-f32-store-reaches-memory
+k2g_core.sv
+                          !misaligned && !out_of_range && !halted_r && !f32_any &&
+                          !misaligned && !out_of_range && !halted_r &&
+detect
+f32_store
+cosim1
+--
+core-store-never-written
+k2g_core.sv
+  assign dbus.req.we    = is_store ? store_we : 4'b0000;
+  assign dbus.req.we    = 4'b0000;
+detect
+hazard
+cosim1
+--
 core-misaligned-not-detected
 k2g_core.sv
       end else if ((is_load || is_store) && misaligned) begin
