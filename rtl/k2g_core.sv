@@ -123,7 +123,19 @@ module k2g_core
 
   // X's multi-cycle states, declared here because the CSP request has to know
   // that something else is already holding the instruction.
-  logic        mem_pending, mulw_pending;
+  logic        mulw_pending;
+
+  // ---- M, declared here with the other multi-cycle state -------------------
+  // The stage itself and why it exists are below, at "M: the memory stage".
+  // These are up here because the CSP guard and the stall expression both have
+  // to see that an access is outstanding.
+  logic        m_valid;      // M holds an access the bus has not finished
+  logic        m_issued;     // ...and its request has been accepted
+  logic        m_is_load;
+  logic [31:0] m_addr;
+  logic [3:0]  m_we;
+  logic [31:0] m_wdata;
+  logic        mem_ack;      // this instruction's access is over
 
   // ICINVR is in flight: the request is out and the caches have not reported
   // done. Declared here with the other multi-cycle states because the stall
@@ -615,7 +627,7 @@ module k2g_core
   // data-bus term is always false (it is not a load or a store), which leaves
   // exactly these two.
   wire logic csp_req      = uop_valid && cond_met && !halted_r && !f32_any &&
-                            !mem_pending && !mulw_pending &&
+                            !m_valid && !mulw_pending &&
                             (is_csp_load || is_csp_store);
 
   logic [31:0] csp_rdata;
@@ -660,33 +672,59 @@ module k2g_core
   logic [31:0] pend_lo;
   logic [1:0]  pend_addr_lo;
 
+  // X hands an access to M. Not gated on `take_uop`: the instruction stays in
+  // X until the access finishes, so the hand-off happens first and the fire
+  // decision follows it rather than the other way round.
+  wire logic mem_start = uop_valid && cond_met && (is_load || is_store) &&
+                         !misaligned && !out_of_range && !halted_r && !f32_any &&
+                         !m_valid && !mem_ack && !mulw_pending;
+
   assign     take_uop   = uop_valid && !stall && !halted_r;
-  wire logic start_load = take_uop && cond_met && is_load &&
-                          !misaligned && !out_of_range;
+  wire logic start_load = mem_start && is_load;
   wire logic start_mulw = take_uop && cond_met && (uop.kind == UOP_ARITH) &&
                           (uop.arith_op == ARITH_MUL) && uop.uto_valid;
 
-  // ---- data bus request --------------------------------------------------
-  // `req_valid` is deliberately NOT qualified by `!stall`, and this is the
-  // one place in the core where that matters. `stall` includes "my request
-  // has not been accepted", so a `req_valid` that consulted the stall would
-  // consult `req_ready` through it -- the rule 3 violation in k2g_chan.sv,
-  // and the same shape as the loop the decoder's `hold` input exists to
-  // avoid. What the request depends on is the decoded instruction and
-  // nothing else.
+  // ---- M: the memory stage ------------------------------------------------
+  // X computes an address; M owns the bus. That boundary is a REGISTER, and
+  // putting it there is the point of this stage rather than a consequence of
+  // it.
   //
-  // `mem_pending` gates it because this master keeps at most one request
-  // outstanding, which is what lets the bus have no response backpressure
-  // (see k2g_membus.sv).
-  wire logic mem_access = uop_valid && cond_met && (is_load || is_store) &&
-                          !misaligned && !out_of_range && !halted_r && !f32_any &&
-                          !mem_pending && !mulw_pending;
+  // Measured before it existed (docs/v2-plan.md 2e): the core's worst path ran
+  //
+  //   uop.src -> register file read -> forwarding mux -> address generation
+  //           -> dbus.req.addr -> start_load -> take_uop -> register file write
+  //
+  // twenty-seven nodes and one instruction's whole life in a single cycle. The
+  // second half of that chain is here now: `dbus.req.*` are register outputs,
+  // so address generation ends at a flop, and the fire decision no longer
+  // reaches through the bus request and back into writeback.
+  //
+  // WHAT THIS STEP DOES NOT DO. The instruction still occupies X until its
+  // access completes -- `mem_pending` still stalls, exactly as before. So this
+  // is one instruction in flight, not two, and nothing can retire out of
+  // order. Decoupling X from M is the next step and is where the forwarding
+  // sources, the load-use interlock and the ordering risk all live; doing it
+  // in the same change as the register boundary would mean debugging both at
+  // once.
+  // Offered until accepted. `req_valid` is a function of M's own registers and
+  // never of `req_ready` (k2g_chan.sv rule 3) -- which the old combinational
+  // version could only claim by keeping `stall` out of it.
+  assign dbus.req_valid = m_valid && !m_issued;
+  assign dbus.req.addr  = m_addr;
+  assign dbus.req.we    = m_we;
+  assign dbus.req.wdata = m_wdata;
+  assign dbus.req.len   = 5'd0;          // the data cache bursts, not this
 
-  assign dbus.req_valid = mem_access;
-  assign dbus.req.addr  = access_addr;
-  assign dbus.req.we    = is_store ? store_we : 4'b0000;
-  assign dbus.req.wdata = store_data;
-  assign dbus.req.len   = 5'd0;          // as above: the data cache bursts, not this
+  // A store is finished when the bus takes it -- there is no response
+  // (k2g_membus.sv). A load is finished when the response arrives.
+  wire logic m_store_done = m_valid && !m_is_load &&
+                            dbus.req_valid && dbus.req_ready;
+  wire logic m_load_done  = m_valid && m_is_load && m_issued && dbus.rsp_valid;
+
+  // The access this instruction asked for is over. Mirrors `cmaint_ack`: the
+  // instruction has not retired yet, so without a latch the cycle after
+  // completion looks exactly like the cycle before the request and issues it
+  // again.
 
   // A CSP access that cannot complete holds the instruction instead of
   // retiring it, and so does a memory access the bus has not accepted or not
@@ -713,9 +751,13 @@ module k2g_core
 
   assign cmaint_req = cmaint_start || cmaint_pending;
 
-  assign stall = mem_pending || mulw_pending || csp_stall ||
-                 cmaint_start || cmaint_pending ||
-                 (mem_access && !dbus.req_ready);
+  // `req_ready` IS NO LONGER IN HERE. It used to be, through
+  // `mem_access && !dbus.req_ready`, which is what put the bus handshake on
+  // the path from address generation into the fire decision. M offers the
+  // request from its own registers now, so the stall only has to say that an
+  // access is outstanding.
+  assign stall = mem_start || m_valid || mulw_pending || csp_stall ||
+                 cmaint_start || cmaint_pending;
 
   // ---- jump latch --------------------------------------------------------
   logic [31:0] nisa;
@@ -797,7 +839,7 @@ module k2g_core
   logic [2:0]  wb_tag;
 
   // A load returns whenever the bus answers; everything else is immediate.
-  wire logic        load_done    = mem_pending && dbus.rsp_valid;
+  wire logic        load_done    = m_load_done;
   wire logic [31:0] load_shifted = dbus.rsp_data >> {pend_addr_lo, 3'b000};
   wire logic [31:0] load_value   = rdt_normalize(load_shifted, pend_tag);
 
@@ -968,8 +1010,15 @@ module k2g_core
   // cycle; everything else commits on its first. The three terms below are
   // mutually exclusive, because both pending flags assert `stall` and
   // `take_uop` requires `!stall`.
-  wire logic retire_now = (take_uop && !start_load && !start_mulw) ||
-                          load_done || mulw_pending;
+  // ONE RETIREMENT PER INSTRUCTION, and with M that is no longer the same
+  // cycle as `take_uop`. A memory op finishes when the bus finishes it and
+  // only leaves X the cycle after, so it retires at completion and the
+  // `take_uop` that follows must not retire it again -- `mem_ack` is exactly
+  // "the instruction leaving X had an access", which is what distinguishes
+  // the two. Getting this wrong steps the emulator twice and the RTL reads one
+  // instruction behind, which is how it was found.
+  wire logic retire_now = (take_uop && !mem_ack && !start_mulw) ||
+                          m_load_done || m_store_done || mulw_pending;
 
   // Captured at `take_uop`, not at retirement. `isa` is valid only in the
   // cycle the instruction is taken: during a second cycle the front end has
@@ -1042,7 +1091,10 @@ module k2g_core
       // W during one cycle and lands in the register file at the edge out of
       // it. Sampling any earlier would compare against state not yet written.
       w_active    <= retire_now;
-      w_retire    <= take_uop ? taken : pend_retire;
+      // `taken` is a function of the uop in X, and a memory op is still there
+      // when it completes -- it is only a widening multiply's second cycle
+      // that runs with the next instruction already in X.
+      w_retire    <= mulw_pending ? pend_retire : taken;
       if (take_uop) pend_retire <= taken;
     end
   end
@@ -1075,8 +1127,14 @@ module k2g_core
       fault_addr      <= 32'd0;
       fault_info      <= 32'd0;
       cycle_count     <= 64'd0;
-      mem_pending     <= 1'b0;
       mulw_pending    <= 1'b0;
+      m_valid         <= 1'b0;
+      m_issued        <= 1'b0;
+      m_is_load       <= 1'b0;
+      m_addr          <= 32'd0;
+      m_we            <= 4'b0000;
+      m_wdata         <= 32'd0;
+      mem_ack         <= 1'b0;
       cmaint_pending  <= 1'b0;
       cmaint_ack      <= 1'b0;
       pend_dst        <= 5'd0;
@@ -1087,11 +1145,28 @@ module k2g_core
     end else if (!halted_r) begin
       // Fetch sequencing lives in its own block above; this one is execute.
 
-      // Second cycles complete here. A load's does not: `mem_pending` is
-      // cleared by the bus answering, however many cycles that takes, rather
-      // than unconditionally on the next edge.
-      if (load_done) mem_pending <= 1'b0;
       mulw_pending <= 1'b0;
+
+      // ---- M ----
+      // Loaded when X hands an access over, cleared when the bus finishes it.
+      // `m_issued` separates "offered" from "accepted": the request stays up
+      // until `req_ready`, and a load then waits further for its response.
+      if (mem_start) begin
+        m_valid   <= 1'b1;
+        m_issued  <= 1'b0;
+        m_is_load <= is_load;
+        m_addr    <= access_addr;
+        m_we      <= is_store ? store_we : 4'b0000;
+        m_wdata   <= store_data;
+      end else begin
+        if (dbus.req_valid && dbus.req_ready) m_issued <= 1'b1;
+        if (m_store_done || m_load_done)      m_valid  <= 1'b0;
+      end
+
+      // The access belonging to THIS instruction is over. Cleared when the
+      // instruction leaves X, for the same reason `cmaint_ack` is.
+      if (take_uop)                      mem_ack <= 1'b0;
+      else if (m_store_done || m_load_done) mem_ack <= 1'b1;
 
       // Held from the cycle the request goes out until the caches answer,
       // however many hundreds of cycles that is.
@@ -1104,7 +1179,6 @@ module k2g_core
       else if (cmaint_done) cmaint_ack <= 1'b1;
 
       if (start_load) begin
-        mem_pending  <= 1'b1;
         pend_dst     <= uop.dst;
         pend_tag     <= uop.datakind;
         pend_addr_lo <= access_addr[1:0];
