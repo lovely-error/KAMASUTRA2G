@@ -50,7 +50,7 @@ module tb_datapath
   logic [4:0]  ra_addr = 0, rb_addr = 0, rc_addr = 0, w_addr = 0;
   logic [31:0] ra_value, rb_value, rc_value, w_value = 0;
   logic        rc_overflow, rc_flag;
-  logic [2:0]  ra_tag, rb_tag, w_tag = RDT_U32;
+  logic [2:0]  ra_tag, rb_tag, rc_tag, w_tag = RDT_U32;
   logic        ra_overflow, rb_overflow, ra_flag, rb_flag;
   logic        we_value = 0, we_tag = 0, we_overflow = 0, we_flag = 0;
   logic        w_overflow = 0, w_flag = 0;

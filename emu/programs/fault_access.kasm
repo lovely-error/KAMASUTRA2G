@@ -1,0 +1,23 @@
+; fault_access.kasm -- a misaligned load faults, in both machines.
+;
+; The access faults are the ones a memory-system change is most likely to
+; break, and until this program existed nothing checked them on the RTL side at
+; all. Deleting the misaligned check from k2g_core.sv outright left every
+; testbench and the whole cosimulation passing: `kgen` chooses every address so
+; it cannot fault, and the shipped programs are all well-behaved by
+; construction.
+;
+; The emulator's own tests cover this (tests/faults_and_io.rs), which is
+; precisely why it needs to be here too -- a fault the reference model raises
+; and the hardware does not is invisible to a test that only asks the reference
+; model.
+;
+; Unlike the decode faults, alignment cannot be known before execute: the
+; address is a register plus a displacement. So this stays predicated like any
+; other execute-time fault -- see fault_squashed.kasm.
+
+        .org    0
+
+        puc32   r1, 3
+        ld32    r2, [r1]        ; MISALIGNED_LOAD -- 3 is not 4-byte aligned
+        halt

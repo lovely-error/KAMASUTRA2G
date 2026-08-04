@@ -1,0 +1,14 @@
+; fault_store.kasm -- a misaligned store faults, and writes nothing.
+;
+; The store path is worth pinning separately from the load: its width comes
+; from the SOURCE register's tag (spec 5.3) rather than from the opcode, so the
+; alignment being checked is derived from a different place than the address.
+; A load that faults is also recoverable in a way a store is not -- by the time
+; a wrong store is noticed, the bytes are already in memory.
+
+        .org    0
+
+        puc32   r1, 1           ; odd address
+        puc32   r2, 7           ; U32 tag -> a 4-byte store
+        st      [r1], r2        ; MISALIGNED_STORE
+        halt

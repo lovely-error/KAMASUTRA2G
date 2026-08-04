@@ -1,0 +1,16 @@
+; fault_range.kasm -- an address past the end of memory faults.
+;
+; ADDR_OUT_OF_RANGE is where the emulator and the RTL have to agree on the size
+; of the address space, which is architecture rather than configuration: the
+; core takes MEM_BYTES as a parameter and the emulator takes it from the image
+; it was handed. The cosimulation is the only thing that checks they were given
+; the same number.
+;
+; v2 is 8 MB of PSRAM, flat at 0, so 0x800000 is the first address that is not
+; there.
+
+        .org    0
+
+        puc32   r1, 0x800000
+        ld32    r2, [r1]        ; ADDR_OUT_OF_RANGE
+        halt

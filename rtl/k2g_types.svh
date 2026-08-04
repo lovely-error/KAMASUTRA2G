@@ -30,7 +30,6 @@ package k2g_types;
     FAULT_ADDR_OUT_OF_RANGE    = 5'h09,
     FAULT_BAD_CSP_PORT         = 5'h0A,
     FAULT_BEXT_ZERO_SPAN       = 5'h0B,
-    FAULT_DOUBLE_PRIME         = 5'h0D,
     FAULT_HALT_INSN            = 5'h1F
   } fault_e;
 
@@ -133,11 +132,16 @@ package k2g_types;
     return u;
   endfunction
 
-  function automatic uop_t uop_fault(input fault_e cause);
+  // `cp` is the code point being decoded when the fault was detected, and it
+  // rides in `imm` because a fault uop has no immediate of its own. The core
+  // reports it as `FAULT_INFO`, which otherwise read as 0 for every decode
+  // fault while the emulator reported the code point (spec 8).
+  function automatic uop_t uop_fault(input fault_e cause, input logic [15:0] cp);
     uop_t u;
     u = uop_nop();
     u.kind = UOP_FAULT;
     u.fault = cause;
+    u.imm = {16'd0, cp};
     return u;
   endfunction
 

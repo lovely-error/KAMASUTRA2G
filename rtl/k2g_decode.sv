@@ -192,7 +192,7 @@ module k2g_decode
       LB_RDT: begin
         // 3'b111 is the one unassigned tag encoding.
         if (arg2[2:0] == 3'b111 || arg2[4:3] != 2'b00) begin
-          main_uop = uop_fault(FAULT_ILLEGAL_OPCODE);
+          main_uop = uop_fault(FAULT_ILLEGAL_OPCODE, cp);
         end else begin
           main_uop.kind     = UOP_SET_TAG;
           main_uop.datakind = arg2[2:0];
@@ -207,7 +207,7 @@ module k2g_decode
                             (lb == LB_LD16) ? RDT_U16 :
                             (lb == LB_LD32) ? RDT_U32 : RDT_F32;
         if (lb == LB_LDF32) begin
-          main_uop = uop_fault(FAULT_FP_UNIMPLEMENTED);  // reserved (spec 11)
+          main_uop = uop_fault(FAULT_FP_UNIMPLEMENTED, cp);  // reserved (spec 11)
         end else if (pfx.csp) begin
           // CSP+LD: port number in arg2, destination arg1 (spec 9).
           main_uop.kind = UOP_CSP_LOAD;
@@ -237,7 +237,7 @@ module k2g_decode
       // ---- arithmetic ----
       LB_ADD, LB_SUB, LB_MUL, LB_DIV: begin
         if (lb == LB_DIV) begin
-          main_uop = uop_fault(FAULT_DIV_UNIMPLEMENTED);  // cut from v1
+          main_uop = uop_fault(FAULT_DIV_UNIMPLEMENTED, cp);  // cut from v1
         end else begin
           main_uop.kind     = UOP_ARITH;
           main_uop.arith_op = (lb == LB_ADD) ? ARITH_ADD :
@@ -257,7 +257,7 @@ module k2g_decode
         // There is no immediate flag bit, so FLAG with an immediate is
         // meaningless (spec 5.6).
         if (pfx.flag && pfx.xi_valid) begin
-          main_uop = uop_fault(FAULT_ILLEGAL_PREFIX_COMBO);
+          main_uop = uop_fault(FAULT_ILLEGAL_PREFIX_COMBO, cp);
         end
       end
 
@@ -268,11 +268,11 @@ module k2g_decode
             LB_SHL: begin
               main_uop.kind = UOP_BEXT;
               if (pfx.bm_span == 5'd0) begin
-                main_uop = uop_fault(FAULT_BEXT_ZERO_SPAN);
+                main_uop = uop_fault(FAULT_BEXT_ZERO_SPAN, cp);
               end
             end
             LB_SHR: main_uop.kind = UOP_BINS;   // span 0 is a defined no-op
-            default: main_uop = uop_fault(FAULT_ILLEGAL_PREFIX_COMBO);
+            default: main_uop = uop_fault(FAULT_ILLEGAL_PREFIX_COMBO, cp);
           endcase
         end else begin
           main_uop.kind     = UOP_SHIFT;
@@ -317,7 +317,7 @@ module k2g_decode
         unique case (arg2)
           EP1_DISP_OFF: main_uop.jump_kind = JT_REL_REG;
           EP1_DISP_ABS: main_uop.jump_kind = JT_ABS_REG;
-          default:      main_uop = uop_fault(FAULT_ILLEGAL_OPCODE);
+          default:      main_uop = uop_fault(FAULT_ILLEGAL_OPCODE, cp);
         endcase
       end
 
@@ -334,7 +334,7 @@ module k2g_decode
             EP2_HALT: main_uop.kind = UOP_HALT;
             EP2_DNO:  main_uop.kind = UOP_NOP;
             EP2_TC:   main_uop.kind = UOP_PERFORM_JUMP;
-            default:  main_uop = uop_fault(FAULT_ILLEGAL_OPCODE);
+            default:  main_uop = uop_fault(FAULT_ILLEGAL_OPCODE, cp);
           endcase
         end else begin
           unique case (ep1_op)
@@ -343,7 +343,7 @@ module k2g_decode
               main_uop.unary_op = (ep1_op == EP1_NOT) ? UNARY_NOT : UNARY_NEG;
               // Negating a single bit is meaningless (spec 5.6).
               if (pfx.flag && ep1_op == EP1_NEG) begin
-                main_uop = uop_fault(FAULT_ILLEGAL_PREFIX_COMBO);
+                main_uop = uop_fault(FAULT_ILLEGAL_PREFIX_COMBO, cp);
               end
             end
             EP1_LLC_B8, EP1_LLC_B16: begin
@@ -354,13 +354,13 @@ module k2g_decode
               main_is_llc   = 1'b1;
               main_llc_kind = RDT_U32;
             end
-            EP1_LLC_F32: main_uop = uop_fault(FAULT_FP_UNIMPLEMENTED);
-            default:     main_uop = uop_fault(FAULT_ILLEGAL_OPCODE);
+            EP1_LLC_F32: main_uop = uop_fault(FAULT_FP_UNIMPLEMENTED, cp);
+            default:     main_uop = uop_fault(FAULT_ILLEGAL_OPCODE, cp);
           endcase
         end
       end
 
-      default: main_uop = uop_fault(FAULT_ILLEGAL_OPCODE);
+      default: main_uop = uop_fault(FAULT_ILLEGAL_OPCODE, cp);
     endcase
   end
 
@@ -387,7 +387,7 @@ module k2g_decode
             // A chain longer than the bound is a fault rather than a hang;
             // the emulator's loop was previously unbounded (spec 3).
             if (pfx.count >= MAX_PREFIX_CHAIN[3:0]) begin
-              uop  = uop_fault(FAULT_PREFIX_CHAIN_TOO_LONG);
+              uop  = uop_fault(FAULT_PREFIX_CHAIN_TOO_LONG, cp);
               emit = 1'b1;
             end else begin
               pfx_next.count = pfx.count + 4'd1;
@@ -403,7 +403,7 @@ module k2g_decode
               end
               if (pfx_xc) begin
                 if (!xc_cond_ok) begin
-                  uop  = uop_fault(FAULT_ILLEGAL_PREFIX_COMBO);
+                  uop  = uop_fault(FAULT_ILLEGAL_PREFIX_COMBO, cp);
                   emit = 1'b1;
                 end else begin
                   pfx_next.cond        = xc_cond;

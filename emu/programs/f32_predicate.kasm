@@ -1,0 +1,20 @@
+; f32_predicate.kasm -- the predicate register is a read like any other.
+;
+; A predicated instruction reads three registers, not two, and the third one is
+; the predicate. It is read whatever the predicate then decides, so an F32 tag
+; on it faults even when the instruction it guards would have been squashed --
+; which is why this check sits outside the `cond_met` gate in the core and
+; ahead of the condition evaluation in the emulator.
+;
+; The tag read port for the predicate exists only for this. Nothing else in the
+; ISA looks at the predicate register's tag.
+;
+; The complementary case is f32_escape, which must NOT fault.
+
+        .org    0
+
+        puc32   r1, 0
+        puc32   r2, 4
+        rdt     r1, f32
+        add     r2, r2 if r1.zero   ; FP_UNIMPLEMENTED -- from the predicate
+        halt

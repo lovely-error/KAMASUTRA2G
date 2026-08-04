@@ -309,7 +309,7 @@ module k2g_core
   // ---- register file -----------------------------------------------------
   logic [4:0]  ra_addr, rb_addr, rc_addr, w_addr;
   logic [31:0] ra_value, rb_value, rc_value, w_value;
-  logic [2:0]  ra_tag, rb_tag, w_tag;
+  logic [2:0]  ra_tag, rb_tag, rc_tag, w_tag;
   logic        ra_overflow, rb_overflow, rc_overflow;
   logic        ra_flag, rb_flag, rc_flag;
   logic        we_value, we_tag, we_overflow, we_flag;
@@ -360,6 +360,7 @@ module k2g_core
   wire logic [31:0] xc_value = (mc && we_value)    ? w_value    : rc_value;
   wire logic [2:0]  xa_tag   = (ma && we_tag)      ? w_tag      : ra_tag;
   wire logic [2:0]  xb_tag   = (mb && we_tag)      ? w_tag      : rb_tag;
+  wire logic [2:0]  xc_tag   = (mc && we_tag)      ? w_tag      : rc_tag;
   wire logic        xa_ovf   = (ma && we_overflow) ? w_overflow : ra_overflow;
   wire logic        xb_ovf   = (mb && we_overflow) ? w_overflow : rb_overflow;
   wire logic        xc_ovf   = (mc && we_overflow) ? w_overflow : rc_overflow;
@@ -391,6 +392,61 @@ module k2g_core
     endcase
     cond_met = (uop.cond == CCK_NONE) ? 1'b1 : (cond_raw ^ uop.cond_invert);
   end
+
+  // ---- reserved F32 operands ---------------------------------------------
+  // `F32` is reserved (spec 11), so reading a register that carries the tag
+  // faults. The two opcodes that would *create* one, `LDF32` and `LLC_F32`,
+  // already fault in decode; this covers the remaining way to get the tag,
+  // which is `RDT rd, f32`.
+  //
+  // Expressed as "which read ports does this uop architecturally use", because
+  // that is what the check physically is: a comparison against `RDT_F32` on a
+  // read port. The ports themselves read every cycle regardless -- port A is
+  // `uop.dst` and port B is `uop.src` -- so an unqualified check would fault on
+  // registers the instruction never looks at.
+  //
+  // Destination-only operands are exempt, which is what leaves `RDT rd, u32`
+  // as the way back out of the tag. The emulator's `check_no_f32_operands`
+  // (emu/src/interp.rs) enumerates the same set, in the same A-before-B order,
+  // so `FAULT_INFO` agrees when both operands carry the tag.
+  logic reads_a, reads_b;
+  always_comb begin
+    reads_a = 1'b0;
+    reads_b = 1'b0;
+    unique case (uop.kind)
+      UOP_COPY:      begin                 reads_b = 1'b1; end
+      UOP_LOAD:      begin                 reads_b = 1'b1; end
+      UOP_CSP_LOAD:  begin                 reads_b = 1'b1; end
+      // Extract writes the whole destination; insert merges into it (spec 5.8).
+      UOP_BEXT:      begin                 reads_b = 1'b1; end
+      UOP_STORE:     begin reads_a = 1'b1; reads_b = 1'b1; end
+      UOP_CSP_STORE: begin reads_a = 1'b1; reads_b = 1'b1; end
+      UOP_BINS:      begin reads_a = 1'b1; reads_b = 1'b1; end
+      UOP_UNARY:     begin reads_a = 1'b1;                 end
+      UOP_ARITH,
+      UOP_LOGIC,
+      UOP_SHIFT,
+      UOP_CMP:       begin reads_a = 1'b1; reads_b = !uop.use_imm; end
+      // The link register is written, not read.
+      UOP_PREP_JUMP: begin reads_a = (uop.jump_kind != JT_REL_IMM); end
+      // NOP, PUT_IMM, SET_TAG, PERFORM_JUMP, HALT and FAULT read no register.
+      // `uop_fault` clears `dst` and `src` anyway, so a decode fault reports
+      // its own cause rather than a tag it never read.
+      default: ;
+    endcase
+  end
+
+  wire logic f32_a    = reads_a && (xa_tag == RDT_F32);
+  wire logic f32_b    = reads_b && (xb_tag == RDT_F32);
+  // The predicate register is read whatever the predicate decides, so its tag
+  // is checked outside the `cond_met` gate below.
+  wire logic f32_cond = (uop.cond != CCK_NONE) && (xc_tag == RDT_F32);
+
+  // The fault suppresses the writeback on its own (`detect_valid` gates it),
+  // but a request leaves the core before the fault block is consulted, so the
+  // two request paths have to be gated here. A store or a CSP write is not
+  // recoverable after the fact: the byte is on the bus, or out of the UART.
+  wire logic f32_any  = f32_a || f32_b || f32_cond;
 
   // ---- functional units --------------------------------------------------
   logic [31:0] alu_a, alu_b;
@@ -503,14 +559,13 @@ module k2g_core
   // So it is gated on every OTHER reason X might not fire. For a CSP uop the
   // data-bus term is always false (it is not a load or a store), which leaves
   // exactly these two.
-  wire logic csp_req      = uop_valid && cond_met && !halted_r &&
+  wire logic csp_req      = uop_valid && cond_met && !halted_r && !f32_any &&
                             !mem_pending && !mulw_pending &&
                             (is_csp_load || is_csp_store);
 
   logic [31:0] csp_rdata;
   logic        csp_bad_port;
   logic        csp_stall;
-  logic [31:0] compat_flags;
   logic        sticky_ordering;
   logic [63:0] cycle_count;
   logic [4:0]  fault_cause;
@@ -539,8 +594,7 @@ module k2g_core
       .uart_rx_valid  (uart_rx_valid),
       .uart_rx_data   (uart_rx_data),
       .uart_rx_take   (uart_rx_take),
-      .gpio_out       (gpio_out),
-      .compat_flags   (compat_flags)
+      .gpio_out       (gpio_out)
   );
 
   // ---- multi-cycle sequencing --------------------------------------------
@@ -570,7 +624,7 @@ module k2g_core
   // outstanding, which is what lets the bus have no response backpressure
   // (see k2g_membus.sv).
   wire logic mem_access = uop_valid && cond_met && (is_load || is_store) &&
-                          !misaligned && !out_of_range && !halted_r &&
+                          !misaligned && !out_of_range && !halted_r && !f32_any &&
                           !mem_pending && !mulw_pending;
 
   assign dbus.req_valid = mem_access;
@@ -596,6 +650,15 @@ module k2g_core
   logic [31:0] nisa;
   logic        nisa_valid;
 
+  logic [31:0] jump_target;
+  always_comb begin
+    unique case (uop.jump_kind)
+      JT_REL_REG: jump_target = isa + xa_value;   // NOT shifted (spec 6.2)
+      JT_ABS_REG: jump_target = xa_value;
+      default:    jump_target = isa + uop.imm;
+    endcase
+  end
+
   // ---- fault detection ---------------------------------------------------
   fault_e      detected;
   logic        detect_valid;
@@ -606,10 +669,23 @@ module k2g_core
     detect_valid = 1'b0;
     detect_info  = 32'd0;
 
-    if (take_uop && cond_met) begin
+    if (take_uop && f32_cond) begin
+      detected     = FAULT_FP_UNIMPLEMENTED;
+      detect_valid = 1'b1;
+      detect_info  = {27'd0, uop.cond_reg};
+    end else if (take_uop && cond_met) begin
       if (uop.kind == UOP_FAULT) begin
         detected     = uop.fault;
         detect_valid = 1'b1;
+        // The offending code point, carried through decode in `imm`.
+        detect_info  = uop.imm;
+      end else if (f32_a || f32_b) begin
+        // Before the access checks below: the emulator rejects the operand
+        // before the instruction executes, so an `F32` address register faults
+        // as FP rather than as whatever address it would have computed.
+        detected     = FAULT_FP_UNIMPLEMENTED;
+        detect_valid = 1'b1;
+        detect_info  = f32_a ? {27'd0, uop.dst} : {27'd0, uop.src};
       end else if ((is_load || is_store) && misaligned) begin
         detected     = is_load ? FAULT_MISALIGNED_LOAD : FAULT_MISALIGNED_STORE;
         detect_valid = 1'b1;
@@ -622,21 +698,16 @@ module k2g_core
         detected     = FAULT_BAD_CSP_PORT;
         detect_valid = 1'b1;
         detect_info  = is_csp_store ? xa_value : xb_value;
-      end else if ((uop.kind == UOP_PERFORM_JUMP) && nisa_valid && nisa[0]) begin
+      end else if ((uop.kind == UOP_PREP_JUMP) && jump_target[0]) begin
+        // Rejected by the instruction that computed the target, not by the
+        // `TC` that would have taken it (spec 6.4). `do_prep_jump` is already
+        // gated on `!detect_valid`, so the latch keeps whatever it held and
+        // the link register is not written.
         detected     = FAULT_MISALIGNED_FETCH;
         detect_valid = 1'b1;
-        detect_info  = nisa;
+        detect_info  = jump_target;
       end
     end
-  end
-
-  logic [31:0] jump_target;
-  always_comb begin
-    unique case (uop.jump_kind)
-      JT_REL_REG: jump_target = isa + xa_value;   // NOT shifted (spec 6.2)
-      JT_ABS_REG: jump_target = xa_value;
-      default:    jump_target = isa + uop.imm;
-    endcase
   end
 
   wire logic do_prep_jump = take_uop && cond_met && (uop.kind == UOP_PREP_JUMP) &&

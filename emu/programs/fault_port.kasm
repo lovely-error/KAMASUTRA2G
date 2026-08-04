@@ -1,0 +1,11 @@
+; fault_port.kasm -- an unmapped CSP port faults rather than reading garbage.
+;
+; I/O is a separate port space rather than part of memory (spec 9), so it has
+; its own decode and its own way to be wrong. An unmapped port used to be an
+; `unimplemented!()` in the emulator, which aborted the process.
+
+        .org    0
+
+        puc32   r1, 0x7FFF      ; not a port
+        in      r2, r1          ; BAD_CSP_PORT
+        halt

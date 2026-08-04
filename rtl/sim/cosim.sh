@@ -112,7 +112,27 @@ if [ -n "$ONE_IMAGE" ]; then
 else
     # The shipped programs first: they exercise control flow, which the random
     # generator deliberately does not.
-    for prog in hello fib hazard; do
+    #
+    # The f32_* programs are here rather than among the emulator's own tests
+    # because what they check is a two-sided property: the reserved F32 tag
+    # (spec 11) must fault with the SAME cause in both machines, and each model
+    # was previously wrong in its own direction. `kgen` cannot reach them --
+    # it deliberately never emits `RDT f32` -- so without these the random
+    # seeds below would sweep straight past the check.
+    #
+    # The fault_* programs cover the execute-time faults, which nothing on the
+    # RTL side pinned: deleting the misaligned check from k2g_core.sv left
+    # every testbench and the whole cosimulation passing. `kgen` cannot reach
+    # them either -- it picks every address so it cannot fault.
+    #
+    # fault_prefix and fault_opcode exist for FAULT_INFO rather than for their
+    # causes: a halted machine cannot read its own fault registers, so the
+    # cosimulation is the only thing that ever looks at them.
+    for prog in hello fib hazard \
+                f32_operand f32_store f32_predicate f32_escape \
+                fault_access fault_store fault_range fault_port fault_fetch \
+                fault_squashed fault_unpredicated \
+                fault_prefix fault_opcode; do
         src="$ROOT/emu/programs/$prog.kasm"
         [ -f "$src" ] || continue
         ( cd "$ROOT/emu" && cargo run --release --quiet --bin kasm -- \

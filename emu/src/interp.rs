@@ -486,7 +486,13 @@ pub fn decode_instruction(
 	let mut prefix_count = 0usize;
 	loop {
 		if prefix_count > MAX_PREFIX_CHAIN {
-			return Err(Fault::new(FaultCause::PrefixChainTooLong, ip));
+			// The prefix that pushed the chain over the bound, re-read from
+			// where it was consumed. Reporting `ip` here made `FAULT_INFO` an
+			// address for this one fault and a code point for every other
+			// decode fault; the RTL reports the code point it was looking at
+			// when it decided, so this does too (spec 8).
+			let offending = fetch(ip + offset as u32 - 2)?;
+			return Err(Fault::new(FaultCause::PrefixChainTooLong, offending as u32));
 		}
 		let cp = fetch(ip + offset as u32)?;
 		
@@ -639,11 +645,17 @@ pub fn decode_instruction(
 			}
 		}
 		LB::LB_LD8 | LB::LB_LD16 | LB::LB_LD32 | LB::LB_LDF32 => {
+			// `LDF32` is the one opcode that exists only to produce an `F32`
+			// register, so it faults on sight -- before the `CSP` split below,
+			// since a float port read is no more implemented than a float load
+			// (spec 8, 11).
+			if op == LB::LB_LDF32 {
+				return Err(Fault::new(FaultCause::FpUnimplemented, main_cp as u32));
+			}
 			let datatype = match op {
 				LB::LB_LD8 => DataKind::U8,
 				LB::LB_LD16 => DataKind::U16,
 				LB::LB_LD32 => DataKind::U32,
-				LB::LB_LDF32 => DataKind::F32,
 				_ => unreachable!(),
 			};
 			if csp {
@@ -691,6 +703,11 @@ pub fn decode_instruction(
 			}
 		}
 		LB::LB_ADD | LB::LB_SUB | LB::LB_MUL | LB::LB_DIV => {
+			// `DIV` is cut from v1 (spec 11), and being cut is a property of
+			// the opcode, so it is rejected here rather than in execute.
+			if op == LB::LB_DIV {
+				return Err(Fault::new(FaultCause::DivUnimplemented, main_cp as u32));
+			}
 			let src2 = if let Some(p) = extended_imm {
 				AluSrc::Imm((p << 5) | (arg2 as u32))
 			} else {
@@ -715,6 +732,12 @@ pub fn decode_instruction(
 			}
 		}
 		LB::LB_AND | LB::LB_OR | LB::LB_XOR => {
+			// `FLAG`-prefixed logic has no immediate form: there is no such
+			// thing as an immediate flag bit. Both halves of that are visible
+			// in decode -- the prefix and the presence of `XI`.
+			if flag_op && extended_imm.is_some() {
+				return Err(Fault::new(FaultCause::IllegalPrefixCombo, main_cp as u32));
+			}
 			let src2 = if let Some(p) = extended_imm {
 				AluSrc::Imm((p << 5) | (arg2 as u32))
 			} else {
@@ -739,6 +762,12 @@ pub fn decode_instruction(
 		LB::LB_SHL | LB::LB_SHR | LB::LB_SHRA => {
 			if let Some((start, span)) = bit_manip {
 				match op {
+					// A zero span is a property of the `BMX` prefix, so it is
+					// rejected here rather than in execute -- see the note on
+					// decode-detected faults in `step`.
+					LB::LB_SHL if span == 0 => {
+						return Err(Fault::new(FaultCause::BextZeroSpan, main_cp as u32));
+					}
 					LB::LB_SHL => CanonInsn::BitExtr {
 						dst: arg1 as u8,
 						src: arg2 as u8,
@@ -751,7 +780,12 @@ pub fn decode_instruction(
 						start,
 						span,
 					},
-					_ => unreachable!(),
+					// `BMX` reinterprets `SHL` and `SHR` and has no meaning on
+					// `SHRA` (spec 5.8). This used to be `unreachable!()`, and
+					// it was reachable: `BMX` then `SHRA` is two ordinary code
+					// points, and the emulator panicked on them -- the exact
+					// failure the fault mechanism exists to replace.
+					_ => return Err(Fault::new(FaultCause::IllegalPrefixCombo, main_cp as u32)),
 				}
 			} else {
 				let op = if op == LB::LB_SHL {
@@ -877,6 +911,11 @@ pub fn decode_instruction(
 				} else {
 					return Err(Fault::new(FaultCause::IllegalOpcode, main_cp as u32));
 				};
+				// Negating a single bit is meaningless, and both the prefix
+				// and the opcode saying so are in hand here.
+				if flag_op && matches!(kind, UnaryOp::AdditiveInverse) {
+					return Err(Fault::new(FaultCause::IllegalPrefixCombo, main_cp as u32));
+				}
 				CanonInsn::Unary {
 					op: kind,
 					target: arg1 as u8,
@@ -891,7 +930,13 @@ pub fn decode_instruction(
 					imm: imm as u32,
 					datakind: datatype,
 				}
-			} else if ep1_op == EP1::EP1_LLC_B32 as _ || ep1_op == EP1::EP1_LLC_F32 as _ {
+			} else if ep1_op == EP1::EP1_LLC_F32 as _ {
+				// Previously decoded together with `LLC_B32` and tagged `U32`,
+				// so the float long-constant silently became an integer one --
+				// `LDF32` produced an `F32` register but `LLC_F32` did not.
+				// Both are float opcodes and both now fault (spec 8, 11).
+				return Err(Fault::new(FaultCause::FpUnimplemented, main_cp as u32));
+			} else if ep1_op == EP1::EP1_LLC_B32 as _ {
 				let high = fetch(ip + offset as u32)?;
 				offset += 2;
 				let low = fetch(ip + offset as u32)?;
@@ -914,6 +959,97 @@ pub fn decode_instruction(
 		cond: conditional,
 		size_bytes: offset as u32,
 	})
+}
+
+/// Faults if the instruction reads any register carrying the reserved `F32`
+/// tag (spec §8, §11).
+///
+/// The emulator used to *execute* on `F32` operands, along a path that
+/// converted numerically instead of reinterpreting bits -- `3.0 + 4.0` in
+/// registers holding 3 and 4 gave 7, not an IEEE-754 pattern. That was neither
+/// the specified fault nor usable floating point, so the whole path is gone.
+///
+/// Only registers the instruction *reads* are checked; destination-only
+/// operands are exempt. That is what leaves `RDT rd, u32` as the way back out
+/// of the tag -- `RDT` re-tags a register rather than consuming its value, so
+/// `F32` is a reserved encoding, not a state a program can get stuck in.
+///
+/// In hardware this is a comparison against tag `0b011` on each register read
+/// port, which is why the check lives in one place rather than in each
+/// execute arm.
+fn check_no_f32_operands(state: &Interpreter, insn: &CanonInsn) -> Result<(), Fault> {
+	let check = |rix: u8| -> Result<(), Fault> {
+		if matches!(state.regs[rix as usize].datatype, DataKind::F32) {
+			return Err(Fault::new(FaultCause::FpUnimplemented, rix as u32));
+		}
+		Ok(())
+	};
+	let check_alu = |src: AluSrc| -> Result<(), Fault> {
+		match src {
+			AluSrc::Reg(r) => check(r),
+			AluSrc::Imm(_) => Ok(()),
+		}
+	};
+	match *insn {
+		// The destination is written whole, so its previous tag is not read.
+		CanonInsn::PutImmidiate { .. } => {}
+		// `RDT` -- the escape hatch described above.
+		CanonInsn::SetDataType { .. } => {}
+		CanonInsn::Load { addr_reg, .. } => check(addr_reg)?,
+		CanonInsn::Copy { src, .. } => check(src)?,
+		CanonInsn::Store { addr_reg, src_reg, .. } => {
+			check(addr_reg)?;
+			// The source tag picks the store width, so an `F32` source is a
+			// float operand in the fullest sense.
+			check(src_reg)?;
+		}
+		// `ESP`, `ICINVR` and `MPI`/`MPD` reinterpret their main opcode into a
+		// no-op (spec 3.2, 10), and a no-op reads nothing. The RTL decodes them
+		// to `UOP_NOP`, whose read ports are dead.
+		CanonInsn::ExportMem { .. }
+		| CanonInsn::DropICacheRange { .. }
+		| CanonInsn::Prefetch { .. } => {}
+		CanonInsn::LoadStatusReg { addr, .. } => check(addr)?,
+		CanonInsn::StoreStatusReg { addr, src } => {
+			check(addr)?;
+			check(src)?;
+		}
+		// `mulw_reg` receives the high half and is not read.
+		CanonInsn::Arith { dst, src2, .. } => {
+			check(dst)?;
+			check_alu(src2)?;
+		}
+		CanonInsn::Logic { dst, src2, .. } => {
+			check(dst)?;
+			check_alu(src2)?;
+		}
+		CanonInsn::BitShift { dst, src2, .. } => {
+			check(dst)?;
+			if let ShiftSrc::Reg(r) = src2 {
+				check(r)?;
+			}
+		}
+		// Extract writes the whole destination; insert merges into it (spec 5.8).
+		CanonInsn::BitExtr { src, .. } => check(src)?,
+		CanonInsn::BitInsr { dst, src, .. } => {
+			check(dst)?;
+			check(src)?;
+		}
+		CanonInsn::Compare { lhs, rhs, .. } => {
+			check(lhs)?;
+			if let CmpSrc::Reg(r) = rhs {
+				check(r)?;
+			}
+		}
+		// The link register is written, not read.
+		CanonInsn::PrepareJump { target, .. } => match target {
+			JumpTarget::RelReg(r) | JumpTarget::AbsReg(r) => check(r)?,
+			JumpTarget::RelImm(_) => {}
+		},
+		CanonInsn::Unary { target, .. } => check(target)?,
+		CanonInsn::Halt | CanonInsn::Nop | CanonInsn::PerformJump => {}
+	}
+	Ok(())
 }
 
 fn eval_condition(state: &Interpreter, cc: ConditionCode, rix: u8) -> bool {
@@ -962,12 +1098,23 @@ impl Interpreter {
 		state.cycles += 1;
 
 		let cond_met = if let Some(cond) = &decoded.cond {
+			// The predicate register is read whatever the outcome, so its tag
+			// is checked here rather than with the operands below.
+			if matches!(state.regs[cond.rix as usize].datatype, DataKind::F32) {
+				let f = Fault::new(FaultCause::FpUnimplemented, cond.rix as u32);
+				return Err(state.take_fault(isa, f));
+			}
 			eval_condition(state, cond.cc, cond.rix) == !cond.is_inverted
 		} else {
 			true
 		};
 
 		if cond_met {
+			// Predicated off, an instruction faults on nothing -- the same rule
+			// `DIV` already follows (spec 7).
+			if let Err(f) = check_no_f32_operands(state, &decoded.insn) {
+				return Err(state.take_fault(isa, f));
+			}
 			match decoded.insn {
 				CanonInsn::PutImmidiate { dst_reg, imm, datakind: datatype } => {
 					let reg = Reg {
@@ -1044,71 +1191,54 @@ impl Interpreter {
 					}
 				}
 				CanonInsn::Arith { op, dst, src2, mulw_reg } => {
+					// The arithmetic unit is integer-only: `F32` operands were
+					// rejected before this point, so nothing here depends on a
+					// runtime tag (spec 11).
 					let mut r1 = state.regs[dst as usize];
-					let mut both_fp = false;
 					let val1 = r1.bits;
 					let val2 = match src2 {
-						AluSrc::Reg(r) => {
-							let r2 = state.regs[r as usize];
-							if matches!((r1.datatype,r2.datatype), (DataKind::F32, DataKind::F32)) {
-								both_fp = true;
-							}
-							r2.bits
-						}
+						AluSrc::Reg(r) => state.regs[r as usize].bits,
 						AluSrc::Imm(imm) => imm,
 					};
 					match op {
 						ArithOp::Add => {
-							if both_fp {
-								let res = ((val1 as f32) + (val2 as f32)) as u32;
-								r1.bits = res;	
+							let (res, ov) = u32::overflowing_add(val1, val2);
+							r1.bits = res;
+							r1.flags.overflow = ov;
+						},
+						ArithOp::Sub => {
+							// `overflow` means "the true result did not fit",
+							// consistently across ADD (carry out), SUB
+							// (borrow) and MUL (high half nonzero).
+							//
+							// This previously formed the two's complement in
+							// 32 bits, discarding its carry, which made the
+							// flag a not-borrow flag AND left it wrong for
+							// val2 == 0. See spec 5.4.
+							let (res, borrow) = u32::overflowing_sub(val1, val2);
+							r1.bits = res;
+							r1.flags.overflow = borrow;
+						},
+						ArithOp::Mul => {
+							if let Some(m_reg) = mulw_reg {
+								let mul_res = (val1 as u64) * (val2 as u64);
+								r1.bits = (mul_res & 0xffffffff) as u32;
+								state.regs[m_reg as usize].bits = (mul_res >> 32) as u32;
+								state.regs[m_reg as usize].datatype = DataKind::U32;
 							} else {
-								let (res, ov) = u32::overflowing_add(val1, val2);
+								let (res, ov) = u32::overflowing_mul(val1, val2);
 								r1.bits = res;
 								r1.flags.overflow = ov;
 							}
 						},
-						ArithOp::Sub => {
-							if both_fp {
-								let res = ((val1 as f32) - (val2 as f32)) as u32;
-								r1.bits = res;
-							} else {
-								// `overflow` means "the true result did not fit",
-								// consistently across ADD (carry out), SUB
-								// (borrow) and MUL (high half nonzero).
-								//
-								// This previously formed the two's complement in
-								// 32 bits, discarding its carry, which made the
-								// flag a not-borrow flag AND left it wrong for
-								// val2 == 0. See spec 5.4.
-								let (res, borrow) = u32::overflowing_sub(val1, val2);
-								r1.bits = res;
-								r1.flags.overflow = borrow;
-							}
-						},
-						ArithOp::Mul => {
-							if both_fp {
-								let res = ((val1 as f32) * (val2 as f32)) as u32;
-								r1.bits = res;
-							} else {
-								if let Some(m_reg) = mulw_reg {
-									let mul_res = (val1 as u64) * (val2 as u64);
-									r1.bits = (mul_res & 0xffffffff) as u32;
-									state.regs[m_reg as usize].bits = (mul_res >> 32) as u32;
-									state.regs[m_reg as usize].datatype = DataKind::U32;
-								} else {
-									let (res, ov) = u32::overflowing_mul(val1, val2);
-									r1.bits = res;
-									r1.flags.overflow = ov;
-								}
-							}
-						},
+						// Decode rejects `DIV`, so this is dead -- but a
+						// reference model that loads arbitrary images must
+						// fault rather than abort if that ever stops being
+						// true, so it reports the cause decode would have.
 						ArithOp::Div => {
-							// Cut from v1: a multi-cycle divider is not worth
-							// the area on a 9K part. Do it in software.
 							let f = Fault::bare(FaultCause::DivUnimplemented);
 							return Err(state.take_fault(isa, f));
-						},
+						}
 					};
 					state.regs[dst as usize] = r1;
 				}
@@ -1120,8 +1250,8 @@ impl Interpreter {
 							AluSrc::Reg(r) => {
 								state.regs[r as usize].flags.flag_bit
 							}
-							// FLAG-prefixed logic has no immediate form: there
-							// is no such thing as an immediate flag bit.
+							// Rejected in decode; faulted here rather than
+							// panicked for the same reason as `DIV` above.
 							AluSrc::Imm(_) => {
 								let f = Fault::bare(FaultCause::IllegalPrefixCombo);
 								return Err(state.take_fault(isa, f));
@@ -1166,10 +1296,7 @@ impl Interpreter {
 					state.regs[dst as usize].bits = res;
 				}
 				CanonInsn::BitExtr { dst, src, start, span } => {
-					if span == 0 {
-						let f = Fault::bare(FaultCause::BextZeroSpan);
-						return Err(state.take_fault(isa, f));
-					}
+					// A zero span never reaches here: decode rejects it.
 					let r1 = state.regs[src as usize];
 					let bits = extract_bits(r1.bits, start as usize, span as usize);
 					let rv = Reg {
@@ -1222,10 +1349,7 @@ impl Interpreter {
 					//   XCP a, c : DISPI then
 					//   XCN a, c : DISPI else
 					//   TC
-					if state.nisa.is_some() && state.dev.traps_on_double_prime() {
-						let f = Fault::bare(FaultCause::DoublePrime);
-						return Err(state.take_fault(isa, f));
-					}
+					//
 					// Relative to `isa`, the start of the whole prefixed
 					// instruction -- NOT to the already-advanced `state.ip`
 					// (spec 6.2).
@@ -1234,6 +1358,20 @@ impl Interpreter {
 						JumpTarget::RelReg(r) => isa.wrapping_add(state.regs[r as usize].bits),
 						JumpTarget::AbsReg(r) => state.regs[r as usize].bits,
 					};
+					// An odd target is rejected HERE, by the instruction that
+					// computed it, rather than later by the `TC` that would
+					// have taken it (spec 6.4). The `TC` is not the instruction
+					// that got it wrong, and it may be a long way away -- the
+					// two-target idiom above puts a whole predicated branch
+					// between them.
+					//
+					// Nothing is committed on the way out: the latch keeps
+					// whatever it held and the link register is not written,
+					// so a faulting prime leaves no trace (spec 8).
+					if target_addr % 2 != 0 {
+						let f = Fault::new(FaultCause::MisalignedFetch, target_addr);
+						return Err(state.take_fault(isa, f));
+					}
 					if let Some(link) = link_reg {
 						state.regs[link as usize].bits = next_ip;
 						state.regs[link as usize].datatype = DataKind::U32;
@@ -1244,11 +1382,11 @@ impl Interpreter {
 					let r1 = &mut state.regs[dst as usize];
 					if on_flags {
 						match op {
-							// Negating a single bit is meaningless.
+							// Rejected in decode; see `DIV` above.
 							UnaryOp::AdditiveInverse => {
 								let f = Fault::bare(FaultCause::IllegalPrefixCombo);
 								return Err(state.take_fault(isa, f));
-							},
+							}
 							UnaryOp::BitwiseNot => {
 								r1.flags.flag_bit = !r1.flags.flag_bit;
 							},
@@ -1256,13 +1394,8 @@ impl Interpreter {
 					} else {
 						match op {
 							UnaryOp::AdditiveInverse => {
-								if matches!(r1.datatype, DataKind::F32) {
-									let v = -(r1.bits as f32);
-									r1.bits = v as u32;
-								} else {
-									let v = (!r1.bits).wrapping_add(1);
-									r1.bits = normalize(v, r1.datatype);
-								}
+								let v = (!r1.bits).wrapping_add(1);
+								r1.bits = normalize(v, r1.datatype);
 							},
 							UnaryOp::BitwiseNot => {
 								let v = !r1.bits;
@@ -1283,11 +1416,11 @@ impl Interpreter {
 					// An unprimed TC is a defined NOP, and must stay one: a
 					// not-taken predicated branch leaves nisa unprimed, so
 					// every conditional branch depends on this (spec 6.5).
+					//
+					// The target was validated when it was primed, so there is
+					// nothing left for the transfer to reject: it either has a
+					// latched address or it does not.
 					if let Some(target) = state.nisa.take() {
-						if target % 2 != 0 {
-							let f = Fault::new(FaultCause::MisalignedFetch, target);
-							return Err(state.take_fault(isa, f));
-						}
 						state.ip = target;
 					}
 				}

@@ -44,8 +44,7 @@ module k2g_csp
     input  logic [7:0]  uart_rx_data,
     output logic        uart_rx_take,
 
-    output logic [31:0] gpio_out,
-    output logic [31:0] compat_flags
+    output logic [31:0] gpio_out
 );
 
   localparam logic [31:0] CORE_ID_VALUE = 32'h4B32_4731;   // "K2G1"
@@ -70,7 +69,6 @@ module k2g_csp
       32'h08: rdata = trap_enable;
       32'h09: rdata = gpio_out;
       32'h0A: rdata = CORE_ID_VALUE;
-      32'h0B: rdata = compat_flags;
       32'h0C: rdata = {31'd0, sticky_ordering};
       default: begin
         rdata    = 32'd0;
@@ -85,8 +83,10 @@ module k2g_csp
   logic bad_write;
   always_comb begin
     unique case (port)
-      32'h00, 32'h01, 32'h07, 32'h08, 32'h09, 32'h0B: bad_write = 1'b0;
-      default:                                        bad_write = 1'b1;
+      // 0x0B was COMPAT_FLAGS; it is gone, so writing it is a bad port like
+      // any other unassigned one.
+      32'h00, 32'h01, 32'h07, 32'h08, 32'h09: bad_write = 1'b0;
+      default:                                bad_write = 1'b1;
     endcase
   end
 
@@ -111,14 +111,12 @@ module k2g_csp
       trap_enable  <= 32'd0;
       uart_divisor <= 32'd0;
       gpio_out     <= 32'd0;
-      compat_flags <= 32'd0;
     end else if (do_write) begin
       unique case (port)
         32'h01:  uart_divisor <= wdata;
         32'h07:  trap_vector  <= wdata;
         32'h08:  trap_enable  <= wdata;
         32'h09:  gpio_out     <= wdata;
-        32'h0B:  compat_flags <= wdata;
         default: ;   // 32'h00 is the UART, handled combinationally above
       endcase
     end

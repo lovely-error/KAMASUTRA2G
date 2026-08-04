@@ -1,0 +1,29 @@
+; fault_prefix.kasm -- an over-long prefix chain, and what it reports.
+;
+; Two things are being compared here, and the second is the reason the program
+; exists. The cause is the easy half: a chain longer than seven prefix code
+; points is PREFIX_CHAIN_TOO_LONG (spec 3), which the emulator's own tests
+; already cover -- its decode loop was once unbounded and this hung it.
+;
+; The half that needed a program is FAULT_INFO. Every decode fault reports the
+; code point it was looking at when it decided, and this fault decides while
+; looking at a PREFIX rather than at a main opcode -- so it is the one case
+; where "the offending code point" is not the code point that ends the
+; instruction. The emulator used to report `ip` here instead, which made this
+; one fault report an address where every other decode fault reports a code
+; point.
+;
+; Written as raw `.word`s because there is no mnemonic for a bare prefix: a
+; prefix with nothing to prefix is exactly what is being tested.
+
+        .org    0
+
+        .word   0x7801          ; XI 1
+        .word   0x7801
+        .word   0x7801
+        .word   0x7801
+        .word   0x7801
+        .word   0x7801
+        .word   0x7801          ; seven: still legal
+        .word   0x7801          ; eight: PREFIX_CHAIN_TOO_LONG
+        halt

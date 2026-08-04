@@ -44,6 +44,8 @@ module tb_cosim
   import "DPI-C" function int unsigned k2g_dpi_get_nisa();
   import "DPI-C" function int unsigned k2g_dpi_get_nisa_valid();
   import "DPI-C" function int unsigned k2g_dpi_get_fault_cause();
+  import "DPI-C" function int unsigned k2g_dpi_get_fault_addr();
+  import "DPI-C" function int unsigned k2g_dpi_get_fault_info();
   import "DPI-C" function int unsigned k2g_dpi_uart_len();
   import "DPI-C" function int unsigned k2g_dpi_uart_at(input int unsigned i);
 
@@ -340,6 +342,27 @@ module tb_cosim
             if ({27'd0, retire.cause} !== k2g_dpi_get_fault_cause()) begin
               $display("TB_FAIL: stop cause differs: RTL=%s(%0d) emulator=%0d",
                        retire.cause.name(), retire.cause, k2g_dpi_get_fault_cause());
+              errors++;
+            end
+            // `fault_addr` and `fault_info` are latched by the same fault, and
+            // the sticky registers are the only place they exist -- unlike the
+            // cause, they are not in the retirement packet.
+            //
+            // They went unchecked until now, and drifted: every decode fault
+            // reported its code point in the emulator and 0 in the RTL, which
+            // is what a halted machine's monitor prints and a debugger reads
+            // (spec 8). Nothing else can catch that -- a program cannot read
+            // its own fault registers, because it is no longer running.
+            checks++;
+            if (fault_addr_o !== k2g_dpi_get_fault_addr()) begin
+              $display("TB_FAIL: fault_addr differs: RTL=%08x emulator=%08x",
+                       fault_addr_o, k2g_dpi_get_fault_addr());
+              errors++;
+            end
+            checks++;
+            if (fault_info_o !== k2g_dpi_get_fault_info()) begin
+              $display("TB_FAIL: fault_info differs: RTL=%08x emulator=%08x",
+                       fault_info_o, k2g_dpi_get_fault_info());
               errors++;
             end
           end

@@ -148,9 +148,14 @@ fn out_of_range_access_faults() {
 	expect_fault(&code, FaultCause::AddrOutOfRange);
 }
 
-/// Jumping to an odd address is caught at the point of commit.
+/// An odd target is rejected where it is computed, not where it is taken.
+///
+/// This used to fault at the `TC`. The `TC` is not the instruction that got it
+/// wrong, and it can be a long way away -- the two-target idiom in §6.6 puts a
+/// whole predicated branch between the prime and the transfer, so the report
+/// named an instruction that was merely the first to notice (spec 6.4).
 #[test]
-fn misaligned_fetch_faults_at_perform_jump() {
+fn an_odd_jump_target_faults_where_it_is_primed() {
 	let code = asm(&[
 		&encode_lc_i5_b32(1, 7), // odd
 		&encode_disp_reg_addr(1),
@@ -158,7 +163,29 @@ fn misaligned_fetch_faults_at_perform_jump() {
 		&encode_halt(),
 	]);
 	let interp = expect_fault(&code, FaultCause::MisalignedFetch);
-	assert_eq!(interp.faults.info, 7);
+	assert_eq!(interp.faults.info, 7, "FAULT_INFO carries the bad target");
+	assert_eq!(
+		interp.faults.addr, 2,
+		"and FAULT_ADDR names the prime at 2, not the TC at 4"
+	);
+}
+
+/// …and it commits nothing on the way out.
+///
+/// `nisa` is architectural state (spec 1.2), so a faulting prime latching its
+/// bad target would be a write by an instruction that is supposed to commit
+/// nothing (spec 8). The `TC` after it would then be holding an address the
+/// machine already rejected.
+#[test]
+fn a_faulting_prime_leaves_the_jump_latch_alone() {
+	let code = asm(&[
+		&encode_lc_i5_b32(1, 7), // odd
+		&encode_disp_reg_addr(1),
+		&encode_ctrl_trn(),
+		&encode_halt(),
+	]);
+	let interp = expect_fault(&code, FaultCause::MisalignedFetch);
+	assert_eq!(interp.nisa, None, "the latch must not take the bad target");
 }
 
 #[test]
@@ -176,6 +203,204 @@ fn rdt_with_the_unassigned_tag_faults() {
 	// 0b111 is the one RDT encoding with no meaning.
 	let code = asm(&[&[pack_6_5_5(LB::LB_RDT as u16, 1, 0b111)], &encode_halt()]);
 	expect_fault(&code, FaultCause::IllegalOpcode);
+}
+
+// -------------------------------------------------------------------------
+// 8 -- where a fault is detected decides whether a predicate can suppress it
+// -------------------------------------------------------------------------
+//
+// A decode-detected fault is a property of the encoding, so it is raised
+// whether or not the predicate would have let the instruction run. An
+// execute-detected fault depends on a register value the squashed instruction
+// never computes, so it is not.
+//
+// This is not a preference: `uop_fault` in the RTL builds its fault micro-op
+// from `uop_nop`, which clears the accumulated prefix state, so the hardware
+// cannot carry a predicate into its fault path without being taught to. The
+// emulator used to raise `DIV`, zero-span `BEXT` and the `FLAG` combinations
+// from execute arms, which meant a squashed one faulted in the RTL and not
+// here -- a divergence `emu/programs/fault_unpredicated.kasm` now pins.
+
+/// Predicate false, and it makes no difference.
+#[test]
+fn decode_faults_are_not_suppressed_by_a_false_predicate() {
+	// r3 == 0, tested inverted, so the guarded instruction is squashed.
+	let squashed = |insn: &[u16]| -> Vec<u16> {
+		asm(&[
+			&encode_lc_i5_b32(1, 8),
+			&encode_lc_i5_b32(2, 2),
+			&encode_lc_i5_b32(3, 0),
+			&encode_xcn(3, CC::CC_VALUE_ZERO),
+			insn,
+			&encode_halt(),
+		])
+	};
+
+	expect_fault(
+		&squashed(&[pack_6_5_5(LB::LB_DIV as u16, 1, 2)]),
+		FaultCause::DivUnimplemented,
+	);
+	expect_fault(
+		&squashed(&[pack_6_5_5(LB::LB_LDF32 as u16, 1, 2)]),
+		FaultCause::FpUnimplemented,
+	);
+	// BMX with a zero span, then SHL -- the extract form (spec 5.8).
+	expect_fault(
+		&squashed(&[
+			pack_6_5_5(LB::LB_BMX_0_0 as u16, 0, 0),
+			pack_6_5_5(LB::LB_SHL as u16, 1, 2),
+		]),
+		FaultCause::BextZeroSpan,
+	);
+	// FLAG + NEG: negating a single bit is meaningless.
+	expect_fault(
+		&squashed(&[
+			pack_6_5_5(LB::LB_EP1 as u16, EP2::EP2_FLAG as u16, EP1::EP1_EP2 as u16),
+			pack_6_5_5(LB::LB_EP1 as u16, 1, EP1::EP1_NEG as u16),
+		]),
+		FaultCause::IllegalPrefixCombo,
+	);
+	// FLAG + an immediate operand, which has no meaning either.
+	expect_fault(
+		&squashed(&[
+			pack_6_5_5(LB::LB_EP1 as u16, EP2::EP2_FLAG as u16, EP1::EP1_EP2 as u16),
+			pack_6_10(LB::LB_XI as u16, 1),
+			pack_6_5_5(LB::LB_AND as u16, 1, 2),
+		]),
+		FaultCause::IllegalPrefixCombo,
+	);
+}
+
+/// The other side of the line: these depend on a value the squashed
+/// instruction never computes, so they stay suppressed.
+#[test]
+fn execute_faults_are_suppressed_by_a_false_predicate() {
+	let code = asm(&[
+		&encode_lc_i5_b32(1, 3), // misaligned for a 32-bit access
+		&encode_lc_i5_b32(3, 0),
+		&encode_xcn(3, CC::CC_VALUE_ZERO),
+		&encode_ld_b32(2, 1),
+		&encode_halt(),
+	]);
+	let (interp, stop) = run(&code);
+	assert_eq!(stop, StopReason::Halted, "a squashed access performs none");
+	assert_eq!(interp.regs[2].bits, 0, "and loads nothing");
+}
+
+// -------------------------------------------------------------------------
+// 11 -- `F32` is reserved, not implemented
+// -------------------------------------------------------------------------
+//
+// The emulator used to execute a float path here instead of faulting, and that
+// path converted numerically rather than reinterpreting bits: with 3 and 4 in
+// the registers, `ADD` produced 7. Neither the specified behaviour nor usable
+// floating point, so all of it is gone.
+
+/// `LDF32` exists only to produce an `F32` register, so it faults on sight.
+#[test]
+fn ldf32_is_fp_unimplemented() {
+	let code = asm(&[
+		&encode_lc_i5_b32(2, 0),
+		&[pack_6_5_5(LB::LB_LDF32 as u16, 1, 2)],
+		&encode_halt(),
+	]);
+	expect_fault(&code, FaultCause::FpUnimplemented);
+}
+
+/// `LLC_F32` used to decode as `LLC_B32` and quietly produce a `U32` register,
+/// so the two float constant-loading opcodes disagreed about their own tag.
+#[test]
+fn llc_f32_is_fp_unimplemented() {
+	let code = asm(&[
+		&[
+			pack_6_5_5(LB::LB_EP1 as u16, 1, EP1::EP1_LLC_F32 as u16),
+			0x3f80, // the two literal code points a float constant would carry
+			0x0000,
+		],
+		&encode_halt(),
+	]);
+	expect_fault(&code, FaultCause::FpUnimplemented);
+}
+
+/// Reading an `F32`-tagged register is the fault, whatever reads it.
+#[test]
+fn f32_tagged_operands_fault_rather_than_computing() {
+	let prelude: Vec<u16> = asm(&[
+		&encode_lc_i5_b32(1, 3),
+		&encode_lc_i5_b32(2, 4),
+		&encode_rdt(1, RDT::RDT_F32),
+		&encode_rdt(2, RDT::RDT_F32),
+	]);
+
+	// Each of these used to run: ADD/SUB/MUL took the float path when *both*
+	// operands were tagged, and NEG took it on the destination alone.
+	let readers: [(&str, Vec<u16>); 6] = [
+		("add", vec![pack_6_5_5(LB::LB_ADD as u16, 1, 2)]),
+		("sub", vec![pack_6_5_5(LB::LB_SUB as u16, 1, 2)]),
+		("mul", vec![pack_6_5_5(LB::LB_MUL as u16, 1, 2)]),
+		("neg", vec![pack_6_5_5(LB::LB_EP1 as u16, 1, EP1::EP1_NEG as u16)]),
+		("cmp", vec![pack_6_5_5(LB::LB_GT as u16, 1, 2)]),
+		("cpy", vec![pack_6_5_5(LB::LB_CPY as u16, 3, 1)]),
+	];
+	for (name, insn) in readers {
+		let code = asm(&[&prelude, &insn, &encode_halt()]);
+		let interp = expect_fault(&code, FaultCause::FpUnimplemented);
+		assert_eq!(
+			interp.regs[1].bits, 3,
+			"{name}: the fault is precise, so nothing commits"
+		);
+	}
+}
+
+/// A single-operand `F32` is enough -- the old path needed *both* operands
+/// tagged, which made the arithmetic unit's behaviour depend on runtime tags.
+#[test]
+fn one_f32_operand_is_enough_to_fault() {
+	let code = asm(&[
+		&encode_lc_i5_b32(1, 3),
+		&encode_lc_i5_b32(2, 4),
+		&encode_rdt(2, RDT::RDT_F32), // only the source
+		&[pack_6_5_5(LB::LB_ADD as u16, 1, 2)],
+		&encode_halt(),
+	]);
+	expect_fault(&code, FaultCause::FpUnimplemented);
+}
+
+/// `RDT` re-tags rather than consuming the value, so `F32` is a reserved
+/// encoding and not a state a program can get stuck in. Spec 8 lists only tag
+/// `0b111` as `ILLEGAL_OPCODE`, so setting the tag itself stays legal.
+#[test]
+fn rdt_is_the_way_back_out_of_the_f32_tag() {
+	let code = asm(&[
+		&encode_lc_i5_b32(1, 3),
+		&encode_lc_i5_b32(2, 4),
+		&encode_rdt(1, RDT::RDT_F32),
+		&encode_rdt(1, RDT::RDT_U32),
+		&[pack_6_5_5(LB::LB_ADD as u16, 1, 2)],
+		&encode_halt(),
+	]);
+	let (interp, stop) = run(&code);
+	assert_eq!(stop, StopReason::Halted, "retagging away from F32 must work");
+	assert_eq!(interp.regs[1].bits, 7);
+}
+
+/// Predicated off, an instruction faults on nothing -- the rule `DIV` already
+/// follows.
+#[test]
+fn a_predicated_off_f32_operand_does_not_fault() {
+	let code = asm(&[
+		&encode_lc_i5_b32(1, 3),
+		&encode_lc_i5_b32(2, 4),
+		&encode_rdt(1, RDT::RDT_F32),
+		&encode_lc_i5_b32(3, 0), // predicate register: zero
+		// Execute only if r3 is non-zero, which it is not.
+		&encode_xcn(3, CC::CC_VALUE_ZERO),
+		&[pack_6_5_5(LB::LB_ADD as u16, 1, 2)],
+		&encode_halt(),
+	]);
+	let (interp, stop) = run(&code);
+	assert_eq!(stop, StopReason::Halted, "a squashed instruction reads nothing");
+	assert_eq!(interp.regs[1].bits, 3, "and computes nothing");
 }
 
 /// Faults are precise: the offending instruction commits nothing.
@@ -360,31 +585,51 @@ fn ignored_ordering_prefix_sets_sticky_status() {
 	);
 }
 
-/// Double priming is legal by default and faults only when asked (spec §6.6).
+/// Double priming is legal, full stop (spec §6.6).
+///
+/// It used to be conditionally a fault, restored by a `COMPAT_FLAGS` bit for
+/// differential testing against an older emulator. Both are gone: the RTL
+/// declared `FAULT_DOUBLE_PRIME` but never raised it and treated the port as
+/// write-only, so with the bit set the two machines disagreed -- a
+/// compatibility switch that only produced incompatibility.
 #[test]
-fn compat_flag_restores_double_prime_fault() {
+fn double_priming_is_legal() {
+	// Both primes target the HALT at 6: the first from isa=0 (3 code points
+	// away), the second from isa=2 (2 away). Displacements are relative to the
+	// instruction that carries them (spec 6.2).
 	let code = asm(&[
-		&encode_lc_i5_b32(10, port::COMPAT_FLAGS as isize),
-		&encode_lc_i5_b32(11, 1), // COMPAT_TRAP_ON_DOUBLE_PRIME
-		&encode_st_mcr(10, 11),
-		&encode_disp_imm(4),
-		&encode_disp_imm(6), // second prime
+		&encode_disp_imm(3),
+		&encode_disp_imm(2),
 		&encode_ctrl_trn(),
 		&encode_halt(),
 	]);
-	expect_fault(&code, FaultCause::DoublePrime);
+	let (_, stop) = run(&code);
+	assert_eq!(stop, StopReason::Halted, "the last prime simply wins");
+}
 
-	// Without the flag the same sequence is fine.
-	let ok = asm(&[
-		&encode_disp_imm(3),
-		&encode_disp_imm(3),
-		&encode_ctrl_trn(),
+/// And the port it lived at is now unassigned like any other.
+#[test]
+fn the_compat_flags_port_is_gone() {
+	let code = asm(&[
+		&encode_lc_i5_b32(10, 0x0B),
+		&encode_lc_i5_b32(11, 1),
+		&encode_st_mcr(10, 11),
 		&encode_halt(),
 	]);
-	let (_, stop) = run(&ok);
-	assert_ne!(
-		stop,
-		StopReason::Faulted(emu::fault::Fault::bare(FaultCause::DoublePrime)),
-		"double priming must be legal by default"
-	);
+	expect_fault(&code, FaultCause::BadCspPort);
+}
+
+/// `BMX` reinterprets `SHL` and `SHR`; on `SHRA` it means nothing (spec §5.8).
+///
+/// The decoder had an `unreachable!()` here, and it was reachable: two ordinary
+/// code points aborted the process. That is the exact failure the fault
+/// mechanism replaced everywhere else, so it is worth a test naming it.
+#[test]
+fn bmx_on_shra_faults_rather_than_panicking() {
+	let code = asm(&[
+		&[pack_6_5_5(LB::LB_BMX_0_0 as u16, 0, 4)],
+		&[pack_6_5_5(LB::LB_SHRA as u16, 1, 2)],
+		&encode_halt(),
+	]);
+	expect_fault(&code, FaultCause::IllegalPrefixCombo);
 }

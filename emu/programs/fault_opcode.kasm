@@ -1,0 +1,15 @@
+; fault_opcode.kasm -- an unassigned encoding, and the code point it reports.
+;
+; `RDT` with tag 0b111 is the one unassigned tag encoding (spec 8), which makes
+; it a compact way to reach ILLEGAL_OPCODE without a wall of `.word`s. A zeroed
+; image reaches the same fault, but reports code point 0 -- indistinguishable
+; from the RTL's old habit of reporting 0 for every decode fault, so it cannot
+; tell a working FAULT_INFO from a broken one.
+;
+; Written as a `.word` because an assembler that emitted this on request would
+; be a bug in the assembler.
+
+        .org    0
+
+        .word   0x6c27          ; RDT r1, <unassigned tag>
+        halt

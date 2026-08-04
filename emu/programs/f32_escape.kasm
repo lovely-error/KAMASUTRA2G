@@ -1,0 +1,27 @@
+; f32_escape.kasm -- the reserved tag is escapable, and squashing still works.
+;
+; The other three F32 programs check that something faults, which a machine
+; that faulted on everything would also pass. This one checks the boundary from
+; the other side: two sequences that involve an F32-tagged register and must
+; run to a clean halt.
+;
+; `RDT` re-tags a register rather than consuming its value, so it is exempt
+; from the read-port check -- which is what keeps `F32` a reserved encoding
+; instead of a state a program cannot leave. And a false predicate reads
+; nothing, so it faults on nothing, the same rule `DIV` follows.
+
+        .org    0
+
+; ---- RDT is the way back out ------------------------------------------
+        puc32   r1, 3
+        puc32   r2, 4
+        rdt     r1, f32
+        rdt     r1, u32
+        add     r1, r2          ; runs: r1 is no longer F32-tagged
+
+; ---- a squashed instruction reads nothing -----------------------------
+        puc32   r3, 0
+        rdt     r2, f32
+        add     r2, r2 if !r3.zero  ; squashed, so the F32 operand is never read
+
+        halt

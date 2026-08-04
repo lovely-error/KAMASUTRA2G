@@ -1,0 +1,17 @@
+; fault_squashed.kasm -- a squashed access faults on nothing.
+;
+; The other fault_* programs would all pass on a machine that faulted on
+; everything. This is the boundary from the other side: the same misaligned
+; load, predicated off, must run to a clean halt in both machines.
+;
+; Execute-time faults are suppressed by a false predicate because the
+; instruction never performs the access (spec 7). Decode-time faults are NOT --
+; see spec 8: an encoding that cannot be executed is rejected whether or not
+; this pass over it would have run.
+
+        .org    0
+
+        puc32   r1, 3           ; misaligned, if it were ever used
+        puc32   r3, 0
+        ld32    r2, [r1] if !r3.zero    ; squashed: no access, no fault
+        halt

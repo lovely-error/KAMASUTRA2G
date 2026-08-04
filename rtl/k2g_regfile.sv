@@ -56,6 +56,7 @@ module k2g_regfile
     // first working core simple. Revisit once cosimulation is green.
     input  logic [4:0]  rc_addr,
     output logic [31:0] rc_value,
+    output logic [2:0]  rc_tag,
     output logic        rc_overflow,
     output logic        rc_flag,
 
@@ -139,6 +140,11 @@ module k2g_regfile
   assign rb_overflow = overflow[rb_addr];
   assign ra_flag     = flagbit[ra_addr];
   assign rb_flag     = flagbit[rb_addr];
+
+  // The predicate port's tag is read for one reason only: `F32` is reserved,
+  // and a predicate register carrying it faults like any other read (spec 11).
+  // It costs a 3-bit read mux on an array that is already flops.
+  assign rc_tag      = tags[rc_addr];
 
   assign rc_overflow = overflow[rc_addr];
   assign rc_flag     = flagbit[rc_addr];

@@ -26,7 +26,7 @@ pub enum FaultCause {
 	FpUnimplemented = 0x05,
 	MisalignedLoad = 0x06,
 	MisalignedStore = 0x07,
-	/// An odd `nisa` reached `PerformJump`.
+	/// A jump was primed with an odd target.
 	MisalignedFetch = 0x08,
 	/// Address at or beyond the end of implemented memory.
 	AddrOutOfRange = 0x09,
@@ -34,8 +34,6 @@ pub enum FaultCause {
 	BadCspPort = 0x0A,
 	/// Bit-field extract with a zero span.
 	BextZeroSpan = 0x0B,
-	/// Only raised when `COMPAT_FLAGS` bit 0 is set; normally last-prime-wins.
-	DoublePrime = 0x0D,
 	/// A normal `HALT`, not an error. Distinguished by `StopReason`.
 	HaltInsn = 0x1F,
 }
@@ -64,7 +62,6 @@ impl FaultCause {
 			FaultCause::AddrOutOfRange => "ADDR_OUT_OF_RANGE",
 			FaultCause::BadCspPort => "BAD_CSP_PORT",
 			FaultCause::BextZeroSpan => "BEXT_ZERO_SPAN",
-			FaultCause::DoublePrime => "DOUBLE_PRIME",
 			FaultCause::HaltInsn => "HALT_INSN",
 		}
 	}

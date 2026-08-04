@@ -289,9 +289,16 @@ Two details that differ from plain `MUL`: [E]
   rather than by special case. [N]
 
 That last point falls out of §1.1.1's invariant rather than being a rule of its own: a signed-tagged
-register's bits are already sign-filled, so a 32-bit arithmetic shift is correct; an unsigned-tagged
-register's value is non-negative, so the arithmetic shift degenerates to a logical one, which is
+register's bits are already sign-filled, so a 32-bit arithmetic shift is correct; a *sub-word*
+unsigned tag leaves bit 31 clear, so the arithmetic shift degenerates to a logical one, which is
 also correct. Concretely, `255` as `U8` shifted right by 4 gives `15`, while `-1` as `S8` stays `-1`.
+
+**`U32` is the exception, and `SHRA` is arithmetic there too.** [N] The degeneration argument needs
+bit 31 to be clear, which a `U32` tag does not guarantee: `0x80000000` as `U32` shifted right by 1
+gives `0xC0000000`, not `0x40000000`. `SHRA` is specified as a plain 32-bit arithmetic shift and
+behaves as one under every tag — the alternative is a shifter that selects its fill bit from a
+runtime tag, which is the same dependence that made the old float path (§11) unimplementable. Use
+`SHR` for a logical shift; that is what it is for.
 
 *Previously `SHRA` sign-extended from bit 31 regardless of tag, so the same `0xFF` byte behaved
 differently depending on whether the untruncated bits above it happened to be set.*
@@ -311,7 +318,8 @@ They write different amounts of state: [E]
 specification defines **`span == 0` as `BEXT_ZERO_SPAN` for extract and a no-op for insert**,
 preserving the observed insert behaviour and making the extract case an explicit fault. [N]
 
-`BMX` + `SHRA` is illegal → `ILLEGAL_PREFIX_COMBO`. [N]
+`BMX` + `SHRA` is illegal → `ILLEGAL_PREFIX_COMBO`. [N] (*the emulator's decoder reached an
+`unreachable!()` here and panicked — two ordinary code points were enough to abort it*)
 
 ### 5.9 Comparisons
 
@@ -401,7 +409,17 @@ That is harmless (§6.5) but must be understood when defining a calling conventi
 ### 6.4 Alignment
 
 All instruction fetch is halfword-aligned. `DISPI` shifts by 1 so it cannot produce an odd target;
-`DISP_OFF`/`DISP_ABS` can. An odd target raises `MISALIGNED_FETCH` at `PerformJump`. [N]
+`DISP_OFF`/`DISP_ABS` can. An odd target raises `MISALIGNED_FETCH` **at `PrepareJump`** — at the
+instruction that computed it, not at the `PerformJump` that would have taken it. [N]
+
+The prime is the instruction that got it wrong; the `TC` merely holds what it was given, and §6.6's
+two-target idiom puts a whole predicated branch between them, so reporting the `TC` names an
+instruction that was only the first to notice. Rejecting it early also means the latch never holds
+an address the machine has already refused: a faulting prime commits nothing, so `nisa` keeps
+whatever it held and the link register is not written.
+
+*Previously raised at `PerformJump`, where the emulator additionally consumed the latch before
+checking, so the faulting transfer cleared architectural state on its way out (§8).*
 
 Data accesses must be naturally aligned — `LD32`/`ST` of a 32-bit-tagged source require `addr[1:0] == 0`,
 `LD16`/`ST` of a 16-bit-tagged source require `addr[0] == 0`, 8-bit is always legal. Otherwise
@@ -441,8 +459,6 @@ XCN rA, FLAG_SET : DISPI  else_target    ; dispi else_target  if !rA.flag
 TC
 ```
 
-A `COMPAT_FLAGS` bit (§9) restores trap-on-double-prime for differential testing.
-
 ### 6.7 Halt
 
 `EP2_HALT` stops the machine. `EP2_DNO` is a no-op.
@@ -472,6 +488,11 @@ Two properties matter for implementation:
 - **A false predicate suppresses all architectural effects, but the instruction still advances the
   PC by its full length.** [E] Predication is squash-on-writeback, not a branch.
 
+**A fault detected in decode is not an architectural effect of the instruction, and is not
+suppressed.** [N] See §8.1: the dividing line is where the fault was detected, not how severe it
+is. The predicate register itself is read either way, so a fault arising from *that* read — today
+only an `F32` tag on it — is raised whatever the predicate then decides.
+
 ---
 
 ## 8. Faults [N]
@@ -487,7 +508,7 @@ machine halts, and four values latch:
 | `fault` | sticky, distinguishes a fault from a normal `HALT` |
 | `fault_cause` | code below |
 | `fault_addr` | `isa` of the faulting instruction |
-| `fault_info` | offending address, or the raw code point |
+| `fault_info` | the offending **address** for an access fault, the offending **code point** for a decode fault |
 
 | Code | Name | Raised by |
 |---|---|---|
@@ -495,14 +516,22 @@ machine halts, and four values latch:
 | 0x02 | `ILLEGAL_PREFIX_COMBO` | `BMX`+`SHRA`; `FLAG`+non-logic; `FLAG`+immediate; `FLAG`+`NEG`; `CSP`+non-memory; unassigned condition code |
 | 0x03 | `PREFIX_CHAIN_TOO_LONG` | more than 7 prefix code points |
 | 0x04 | `DIV_UNIMPLEMENTED` | `DIV` (§11) |
-| 0x05 | `FP_UNIMPLEMENTED` | `LDF32`, or any `F32`-tagged operand (§11) |
+| 0x05 | `FP_UNIMPLEMENTED` | `LDF32`, `LLC_F32`, or reading any `F32`-tagged register (§11) |
 | 0x06 / 0x07 | `MISALIGNED_LOAD` / `MISALIGNED_STORE` | §6.4 |
-| 0x08 | `MISALIGNED_FETCH` | odd `nisa` at `PerformJump` |
+| 0x08 | `MISALIGNED_FETCH` | a jump primed with an odd target (§6.4) |
 | 0x09 | `ADDR_OUT_OF_RANGE` | address beyond implemented memory |
 | 0x0A | `BAD_CSP_PORT` | unmapped I/O port |
 | 0x0B | `BEXT_ZERO_SPAN` | `BMX` span 0 with `SHL` |
-| 0x0D | `DOUBLE_PRIME` | only when `COMPAT_FLAGS.0` is set |
 | 0x1F | `HALT_INSN` | normal `HALT`; distinguished by `fault == 0` |
+
+Which of the two it is follows §8.1's split, and the code-point case means *the code point being
+decoded when the fault was detected* — for `PREFIX_CHAIN_TOO_LONG` that is the prefix that pushed
+the chain over the bound, not the main opcode the instruction never reached. [N]
+
+*The RTL reported 0 for every decode fault, because its fault micro-op carried no code point; the
+emulator reported `ip` for `PREFIX_CHAIN_TOO_LONG` and the code point for the rest. Neither is
+readable by the program that faulted — the machine is halted — so nothing noticed until the
+cosimulation began comparing `fault_addr` and `fault_info` as well as the cause.*
 
 **Precision is structural, not an added guarantee**: register writes happen only at the end of
 execute, and stores are gated by checks performed during address generation, so nothing commits
@@ -512,7 +541,31 @@ A halted core cannot execute a `CSP` read to report its own cause, so implementa
 `fault_cause` externally — on LEDs, and via a monitor that dumps the fault registers over the UART
 when the machine halts.
 
-### 8.1 Reserved for later
+### 8.1 Decode faults ignore the predicate; execute faults do not
+
+Where a fault is detected decides whether §7's predicate can suppress it. [N]
+
+| Detected in | Faults | Suppressed by a false predicate? |
+|---|---|---|
+| Decode | `ILLEGAL_OPCODE`, `ILLEGAL_PREFIX_COMBO`, `PREFIX_CHAIN_TOO_LONG`, `DIV_UNIMPLEMENTED`, `FP_UNIMPLEMENTED` from `LDF32`/`LLC_F32`, `BEXT_ZERO_SPAN` | **No** |
+| Execute | `MISALIGNED_LOAD`/`STORE`, `ADDR_OUT_OF_RANGE`, `BAD_CSP_PORT`, `MISALIGNED_FETCH`, `FP_UNIMPLEMENTED` from an operand read | **Yes** |
+
+The split is not arbitrary. A decode fault is a property of the *encoding*: an instruction that
+cannot be executed at all is rejected whether or not this pass over it would have run, the same way
+an assembler rejects it without knowing which paths run. An execute fault depends on a register
+value, and a squashed instruction never computes one — there is no address to be misaligned.
+
+It is also what the hardware can do without being taught otherwise: `uop_fault` in
+`rtl/k2g_types.svh` builds its fault micro-op from `uop_nop`, which clears the accumulated prefix
+state, so a decode fault arrives at execute with no predicate attached. The emulator used to raise
+`DIV`, zero-span `BEXT` and the `FLAG` combinations from its execute path instead, which made a
+squashed one fault in the RTL and not in the reference model. Specified this way rather than fixed
+in both, because the encoding argument stands on its own.
+
+`emu/programs/fault_unpredicated.kasm` and `fault_squashed.kasm` pin the two halves against each
+other through the cosimulation.
+
+### 8.2 Reserved for later
 
 `TRAP_VECTOR` and `TRAP_ENABLE` (§9) are allocated but must read as 0 and have no effect. When
 implemented, a fault will redirect fetch instead of halting. Since there are no interrupts, a
@@ -547,7 +600,6 @@ forms: [E]
 | 0x08 | `TRAP_ENABLE` | R/W | reserved, resets to 0 |
 | 0x09 | `GPIO_OUT` | R/W | board LEDs |
 | 0x0A | `CORE_ID` | R | `0x4B324731` ("K2G1") |
-| 0x0B | `COMPAT_FLAGS` | R/W | bit 0: trap on double prime (§6.6), resets to 0 |
 | 0x0C | `STICKY_STATUS` | R | bit 0: a removed ordering prefix was executed (§11) |
 
 Any other port → `BAD_CSP_PORT`.
@@ -561,27 +613,46 @@ silent difference in results.
 
 | Omitted | Behaviour | Why |
 |---|---|---|
-| `F32` and all float ops | `FP_UNIMPLEMENTED` | Expensive on a 9K-LUT part, and the emulator's float path is not IEEE-754 anyway (§11) |
+| `F32` and all float ops | `FP_UNIMPLEMENTED` | Expensive on a 9K-LUT part, and the emulator's old float path was not IEEE-754 anyway (§11) |
 | `DIV` | `DIV_UNIMPLEMENTED` | Multi-cycle divider not worth the area; do it in software |
 | Ordering prefixes `LTL`/`SL`/`SS`/`SR` | Ignored; the load/store still happens. Sets `STICKY_STATUS.0` | Single core — ignoring them is semantically correct |
 | `ESP`, `ICINVR`, `MPI`/`MPD` | **Decoded and honoured as no-ops** | They *reinterpret* their main opcode; ignoring the prefix would perform a real store or compare (§3.2) |
-| Resumable traps | Halt instead | §8.1 |
+| Resumable traps | Halt instead | §8.2 |
 
 ---
 
 ## 11. Notes on `F32`
 
-`F32` is specified as reserved rather than defined, because the emulator's float support is not
-usable as a reference:
+`F32` is specified as reserved rather than defined, because the float support the emulator used to
+carry was not usable as a reference:
 
-- It converts rather than reinterprets — `bits as f32` and `f32 as u32` are *numeric conversions*,
-  so an `F32` register does not hold an IEEE-754 bit pattern at all.
-- `SUB` on the float path computes `a + b`.
-- Float behaviour is selected dynamically by *both* operands being `F32`-tagged, making the
+- It converted rather than reinterpreted — `bits as f32` and `f32 as u32` are *numeric
+  conversions*, so an `F32` register did not hold an IEEE-754 bit pattern at all. Registers holding
+  3 and 4 added to 7.
+- Float behaviour was selected dynamically by *both* operands being `F32`-tagged, making the
   arithmetic unit's behaviour depend on runtime tags.
+- `LDF32` produced an `F32` register but `LLC_F32` decoded as `LLC_B32` and produced a `U32` one,
+  so the two float constant-loading opcodes disagreed about their own tag.
 
-Any future `F32` must be designed from scratch against IEEE-754, not derived from the current
-emulator. Until then it faults.
+That path is gone rather than corrected. Any future `F32` must be designed from scratch against
+IEEE-754, not derived from it.
+
+**What faults, and where.** [N] `LDF32` and `LLC_F32` fault at decode: they exist only to produce an
+`F32` register. Otherwise the fault is raised by *reading* a register that carries the tag — in
+hardware, a comparison against tag `0b011` on each register read port. Destination-only operands
+are exempt, which is what leaves `RDT rd, u32` as the way back out: `RDT` re-tags a register
+rather than consuming its value, so `F32` is a reserved encoding and not a state a program can get
+stuck in. `RDT rd, f32` itself therefore stays legal — §8 lists only tag `0b111` as
+`ILLEGAL_OPCODE` — and every subsequent use of that register faults.
+
+Predication comes first: an instruction squashed by a false predicate reads nothing and so faults
+on nothing, the same rule `DIV` follows. The predicate register is read either way, so its tag is
+checked either way.
+
+A fault raised in decode wins over this one, which is why `DIV` on an `F32`-tagged register reports
+`DIV_UNIMPLEMENTED`: the RTL decodes `DIV` straight to a fault micro-op, and a fault micro-op names
+no registers to read. `emu/programs/f32_*.kasm` pin all of this against the RTL through the
+cosimulation, since the random program generator never emits `RDT f32`.
 
 ---
 
@@ -617,10 +688,12 @@ old behaviour may still be lurking in notes or prototypes. All are [N].
 | `SUB`'s `overflow` was a not-borrow flag, wrong for `b == 0` | a plain borrow flag | 5.4 |
 | `PUC*` stored the untruncated value | normalized to the tag | 5.1 |
 | `XIZEXT` + `DISPI` sign-extended anyway | zero-extends as named | 4.1 |
-| `SHRA` sign-extended from bit 31 regardless of tag | follows the tag's signedness | 5.7 |
+| `SHRA` sign-extended from bit 31 of bits the tag had not extended | the same 32-bit arithmetic shift, over bits the tag has already extended | 5.7 |
 | Comparisons were always unsigned | 33-bit widening by each operand's tag | 5.9 |
-| Double priming `nisa` panicked | last prime wins | 6.6 |
-| Float `SUB` computed `a + b` | `F32` is reserved and faults | 11 |
+| Double priming `nisa` panicked | last prime wins, unconditionally | 6.6 |
+| `MISALIGNED_FETCH` was raised at `PerformJump` | raised at `PrepareJump`, by the instruction that computed the target | 6.4 |
+| `DOUBLE_PRIME` and the `COMPAT_FLAGS` port that armed it | both removed — nothing needed them, and the RTL never implemented the fault | 6.6, 9 |
+| Float ops converted numerically instead of reinterpreting bits, and `LLC_F32` produced a `U32` register | `F32` is reserved; the path is removed and every use faults | 11 |
 
 ---
 

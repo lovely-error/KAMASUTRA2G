@@ -1,0 +1,27 @@
+; fault_unpredicated.kasm -- a decode-detected fault ignores the predicate.
+;
+; The counterpart to fault_squashed.kasm, and the line between them is where
+; the fault was detected rather than how bad it is:
+;
+;   * Execute-time faults (misaligned, out of range, bad port) depend on a
+;     register value, so a squashed instruction never computes one and never
+;     faults.
+;   * Decode-time faults (DIV, LDF32, LLC_F32, BEXT with a zero span, an
+;     unassigned opcode, an illegal prefix combination) are properties of the
+;     encoding. An encoding that cannot be executed is rejected whether or not
+;     this pass over it would have run.
+;
+; This program pins the second rule, which the two machines used to disagree
+; about: the RTL faulted here and the emulator ran on to the halt. The cause
+; was `uop_fault` in k2g_types.svh clearing the accumulated prefix state --
+; including the predicate -- so `cond_met` was forced true for every decode
+; fault. Rather than teach the hardware to carry a predicate into its fault
+; path, the rule is now spelled out in spec 8 and the emulator follows it.
+
+        .org    0
+
+        puc32   r1, 8
+        puc32   r2, 2
+        puc32   r3, 0
+        div     r1, r2 if !r3.zero  ; squashed, and still DIV_UNIMPLEMENTED
+        halt

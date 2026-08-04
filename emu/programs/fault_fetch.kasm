@@ -1,0 +1,23 @@
+; fault_fetch.kasm -- jumping to an odd address faults at the transfer.
+;
+; The last of the execute-time faults, and the one that survived longest
+; unpinned: with the check deleted from k2g_core.sv, every testbench and the
+; whole cosimulation still passed.
+;
+; It is detected at the prime rather than at the transfer (spec 6.4): the
+; `DISPA` is the instruction that computed the bad target, and the `TC` may be
+; a long way from it -- §6.6's two-target idiom puts a whole predicated branch
+; in between. So `fault_addr` names the `DISPA` and the `TC` is never reached.
+;
+; Nothing is committed on the way out either, which is the part the two
+; machines have to agree on and the reason this program exists: the emulator
+; used to consume the jump latch before validating the target, so a faulting
+; transfer cleared architectural state the RTL kept. The cosimulation compares
+; `nisa`, and caught it.
+
+        .org    0
+
+        puc32   r1, 7           ; odd, so not a legal instruction address
+        dispa   r1              ; MISALIGNED_FETCH, right here
+        tc                      ; never reached
+        halt

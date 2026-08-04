@@ -1,0 +1,20 @@
+; f32_store.kasm -- an F32 address register must not reach the bus.
+;
+; The read-port check has to happen before the request leaves the core, not
+; merely before the writeback. A fault suppresses the register write on its own
+; -- writeback is gated on it -- but a store is already on the bus by then, and
+; a CSP write is already out of the UART. Precision is the whole point of a
+; machine-check halt (spec 8): the offending instruction commits nothing.
+;
+; A store also reads *both* ports, address and data, which is what makes it the
+; useful case: its width comes from the source register's tag (spec 5.3), so an
+; F32 source is a float operand in the fullest sense rather than a tag nobody
+; consults.
+
+        .org    0
+
+        puc32   r1, 0x200
+        puc32   r2, 0xAA
+        rdt     r1, f32
+        st      [r1], r2        ; FP_UNIMPLEMENTED -- and no write at 0x200
+        halt

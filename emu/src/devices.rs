@@ -22,7 +22,9 @@ pub mod port {
 	pub const TRAP_ENABLE: u32 = 0x08;
 	pub const GPIO_OUT: u32 = 0x09;
 	pub const CORE_ID: u32 = 0x0A;
-	pub const COMPAT_FLAGS: u32 = 0x0B;
+	// 0x0B was `COMPAT_FLAGS`, whose only bit restored trap-on-double-prime.
+	// Removed: nothing needed it, the RTL never implemented the fault behind
+	// it, and a port the two machines disagree about is worse than no port.
 	pub const STICKY_STATUS: u32 = 0x0C;
 }
 
@@ -33,11 +35,6 @@ pub const CORE_ID_VALUE: u32 = 0x4B32_4731;
 pub const UART_STATUS_TX_FULL: u32 = 1 << 0;
 /// `UART_STATUS` bit: receive buffer empty.
 pub const UART_STATUS_RX_EMPTY: u32 = 1 << 1;
-
-/// `COMPAT_FLAGS` bit 0: fault on a second `PrepareJump` instead of
-/// last-prime-wins (spec §6.6). Off by default; used for differential testing
-/// against the older behaviour.
-pub const COMPAT_TRAP_ON_DOUBLE_PRIME: u32 = 1 << 0;
 
 /// `STICKY_STATUS` bit 0: a memory-ordering prefix that v1 ignores was
 /// executed. Not an error — a hint that the program expects multicore
@@ -120,7 +117,6 @@ pub struct Devices {
 	pub uart: UartIo,
 	pub uart_divisor: u32,
 	pub gpio_out: u32,
-	pub compat_flags: u32,
 	pub sticky_status: u32,
 	pub trap_vector: u32,
 	pub trap_enable: u32,
@@ -132,7 +128,6 @@ impl Default for Devices {
 			uart: UartIo::Null,
 			uart_divisor: 0,
 			gpio_out: 0,
-			compat_flags: 0,
 			sticky_status: 0,
 			trap_vector: 0,
 			trap_enable: 0,
@@ -175,7 +170,6 @@ impl Devices {
 			port::TRAP_ENABLE => self.trap_enable,
 			port::GPIO_OUT => self.gpio_out,
 			port::CORE_ID => CORE_ID_VALUE,
-			port::COMPAT_FLAGS => self.compat_flags,
 			port::STICKY_STATUS => self.sticky_status,
 			_ => return Err(Fault::new(FaultCause::BadCspPort, port)),
 		})
@@ -190,7 +184,6 @@ impl Devices {
 			port::TRAP_VECTOR => self.trap_vector = value,
 			port::TRAP_ENABLE => self.trap_enable = value,
 			port::GPIO_OUT => self.gpio_out = value,
-			port::COMPAT_FLAGS => self.compat_flags = value,
 			port::CYCLE_COUNT_LO
 			| port::CYCLE_COUNT_HI
 			| port::FAULT_CAUSE
@@ -207,9 +200,5 @@ impl Devices {
 
 	pub fn note_removed_ordering_prefix(&mut self) {
 		self.sticky_status |= STICKY_REMOVED_ORDERING_PREFIX;
-	}
-
-	pub fn traps_on_double_prime(&self) -> bool {
-		self.compat_flags & COMPAT_TRAP_ON_DOUBLE_PRIME != 0
 	}
 }

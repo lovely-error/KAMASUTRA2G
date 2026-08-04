@@ -238,6 +238,16 @@ module tb_decode
     feed('{p655(LB_LDF32, 5'd1, 5'd2)}, "ldf32");
     check("ldf32 faults", last.kind == UOP_FAULT &&
                           last.fault == FAULT_FP_UNIMPLEMENTED);
+    // The other float opcode, and the one the emulator used to decode as
+    // `LLC_B32` -- so `LDF32` produced an F32 register there while `LLC_F32`
+    // produced a U32 one. Both are float and both fault (spec 11).
+    //
+    // One code point, not three: the fault is raised before the literal
+    // halfwords are collected, and the machine halts on it, so they are never
+    // fetched. The emulator does the same.
+    feed('{p655(LB_EP1, 5'd1, EP1_LLC_F32)}, "llc_f32");
+    check("llc_f32 faults", last.kind == UOP_FAULT &&
+                            last.fault == FAULT_FP_UNIMPLEMENTED);
 
     // ---- illegal encodings ----------------------------------------------
     feed('{16'h0000}, "zero word");

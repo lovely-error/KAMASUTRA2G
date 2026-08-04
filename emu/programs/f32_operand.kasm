@@ -1,0 +1,25 @@
+; f32_operand.kasm -- reading a reserved F32 register faults, in both machines.
+;
+; `F32` is reserved rather than defined (spec 11), and the two opcodes that
+; would produce one, `LDF32` and `LLC_F32`, are rejected in decode. `RDT rd,
+; f32` is the one remaining way to put the tag on a register, so it is the only
+; way to reach the check that matters here: the fault raised by *reading* a
+; register that carries it.
+;
+; This exists as a cosimulation program rather than a unit test because it is a
+; two-sided property. The emulator used to execute an F32 path instead of
+; faulting, and the RTL used to fault on the two opcodes but had no read-port
+; check at all -- so each model was wrong in its own direction and nothing
+; compared them. The cosimulation compares the fault cause, which is the part
+; that was diverging.
+;
+; The machine halts on the fault, so one program can only ever test one read
+; port; the others are f32_store, f32_predicate and f32_escape.
+
+        .org    0
+
+        puc32   r1, 3
+        puc32   r2, 4
+        rdt     r1, f32
+        add     r1, r2          ; FP_UNIMPLEMENTED -- r1 is an F32 operand
+        halt
