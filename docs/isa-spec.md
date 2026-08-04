@@ -478,8 +478,13 @@ register** and a condition code:
 | `CC_VALUE_NEGATIVE` | that register's **value**, bit 31 set |
 | `CC_VALUE_POSITIVE` | value neither zero nor negative |
 
-Any other condition code → `ILLEGAL_PREFIX_COMBO`. [N] (*the emulator falls back to treating the
-code point as a non-prefix, which then usually decodes as garbage*)
+Only these five of `arg2`'s 32 values are assigned. Any other → `ILLEGAL_PREFIX_COMBO`, reported
+against the offending prefix code point. [N]
+
+*The emulator used to check the condition code before the opcode and answer "not a prefix" to both
+questions, so a predicate prefix naming an unassigned code was decoded as a main opcode instead —
+`ILLEGAL_OPCODE` here, since `LB_XCP` is unassigned in the main table, but in general a different
+instruction than the one written, executed. The RTL always faulted.*
 
 Two properties matter for implementation:
 

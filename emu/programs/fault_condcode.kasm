@@ -1,0 +1,20 @@
+; fault_condcode.kasm -- a predicate prefix naming a condition that does not
+; exist.
+;
+; Only five of `arg2`'s 32 values are assigned condition codes (spec 7, codes
+; 27..31). The other 27 make the prefix illegal, and the two machines used to
+; disagree about that in the most confusing possible way: the RTL faulted,
+; while the emulator decided the code point was not a prefix at all and decoded
+; it as a main opcode. Not a wrong answer to the question -- a different
+; instruction, executed.
+;
+; The spec has carried this as `[N]` with a note that the emulator did not
+; implement it. Now both do, and this program is what keeps them together.
+;
+; Written as a `.word` because the assembler only emits the five real
+; conditions; there is no way to ask it for this.
+
+        .org    0
+
+        .word   0x7c20          ; XCP r1, <unassigned condition code>
+        halt

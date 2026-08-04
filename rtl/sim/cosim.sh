@@ -127,12 +127,14 @@ else
     #
     # fault_prefix and fault_opcode exist for FAULT_INFO rather than for their
     # causes: a halted machine cannot read its own fault registers, so the
-    # cosimulation is the only thing that ever looks at them.
+    # cosimulation is the only thing that ever looks at them. fault_condcode
+    # is for the cause, which used to be ILLEGAL_OPCODE here and
+    # ILLEGAL_PREFIX_COMBO in the RTL.
     for prog in hello fib hazard \
                 f32_operand f32_store f32_predicate f32_escape \
                 fault_access fault_store fault_range fault_port fault_fetch \
                 fault_squashed fault_unpredicated \
-                fault_prefix fault_opcode; do
+                fault_prefix fault_opcode fault_condcode; do
         src="$ROOT/emu/programs/$prog.kasm"
         [ -f "$src" ] || continue
         ( cd "$ROOT/emu" && cargo run --release --quiet --bin kasm -- \

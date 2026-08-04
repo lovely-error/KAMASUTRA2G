@@ -418,8 +418,25 @@ pub struct Conditional {
 	pub cc: ConditionCode
 }
 
-fn try_decode_xc(code_point: u16) -> Option<Conditional> {
+/// Decodes an `XCP`/`XCN` predicate prefix.
+///
+/// `Ok(None)` means this code point is not one; `Err` means it is, and names a
+/// condition code outside the assigned set.
+///
+/// Those two used to be the same answer. The opcode was checked *after* the
+/// condition code, so an `XCP` with an unassigned code returned "not a prefix",
+/// and the decoder went on to treat a predicate prefix as a main opcode --
+/// which decoded as whatever `LB_XCP` happens to mean in the main table. Spec 7
+/// calls it `ILLEGAL_PREFIX_COMBO`, and the RTL has always raised it.
+fn try_decode_xc(code_point: u16) -> Result<Option<Conditional>, Fault> {
 	let (lbs, arg1, arg2) = unpack_6_5_5(code_point);
+	let is_inverted = if lbs == LB::LB_XCP as _ {
+		false
+	} else if lbs == LB::LB_XCN as _ {
+		true
+	} else {
+		return Ok(None);
+	};
 	let cc = if arg2 == CC::CC_FLAG_SET as _ {
 		ConditionCode::FlagSet
 	} else if arg2 == CC::CC_OVERFLOW_SET as _ {
@@ -431,15 +448,9 @@ fn try_decode_xc(code_point: u16) -> Option<Conditional> {
 	} else if arg2 == CC::CC_VALUE_NEGATIVE as _ {
 		ConditionCode::ValueIsNegative
 	} else {
-		return None;
+		return Err(Fault::new(FaultCause::IllegalPrefixCombo, code_point as u32));
 	};
-	if lbs == LB::LB_XCP as _ {
-		return Some(Conditional { is_inverted: false, rix: arg1 as _, cc })
-	}
-	if lbs == LB::LB_XCN as _ {
-		return Some(Conditional { is_inverted: true, rix: arg1 as _, cc })
-	}
-	return None
+	Ok(Some(Conditional { is_inverted, rix: arg1 as _, cc }))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -504,7 +515,7 @@ pub fn decode_instruction(
 			continue;
 		}
 		
-		if let Some(cond) = try_decode_xc(cp) {
+		if let Some(cond) = try_decode_xc(cp)? {
 			conditional = Some(cond);
 			offset += 2;
 			prefix_count += 1;

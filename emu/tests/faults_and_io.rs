@@ -633,3 +633,34 @@ fn bmx_on_shra_faults_rather_than_panicking() {
 	]);
 	expect_fault(&code, FaultCause::IllegalPrefixCombo);
 }
+
+/// An `XCP`/`XCN` naming a condition code outside the assigned set (spec §7).
+///
+/// The decoder checked the condition code before the opcode and answered "not
+/// a prefix" for both, so a predicate prefix with a bad code fell through and
+/// was decoded as a main opcode -- whatever `LB_XCP` means in the main table.
+/// The RTL faulted here from the start; the spec marked this `[N]` and noted
+/// the emulator did not.
+#[test]
+fn an_unassigned_condition_code_faults() {
+	for lb in [LB::LB_XCP, LB::LB_XCN] {
+		// 0 is not one of the five assigned codes (27..31).
+		let cp = pack_6_5_5(lb as u16, 1, 0);
+		let code = asm(&[&[cp], &encode_halt()]);
+		let interp = expect_fault(&code, FaultCause::IllegalPrefixCombo);
+		assert_eq!(
+			interp.faults.info, cp as u32,
+			"FAULT_INFO carries the offending prefix"
+		);
+	}
+	// The assigned ones still decode as predicates.
+	let code = asm(&[
+		&encode_lc_i5_b32(1, 0),
+		&encode_xcp(1, CC::CC_VALUE_ZERO),
+		&encode_lc_i5_b32(2, 5),
+		&encode_halt(),
+	]);
+	let (interp, stop) = run(&code);
+	assert_eq!(stop, StopReason::Halted);
+	assert_eq!(interp.regs[2].bits, 5, "r1 is zero, so the predicate holds");
+}
