@@ -344,12 +344,76 @@ Two things follow, and they are the two halves of this step:
   request and then feeds writeback, which is the global `stall` in its most expensive form. That is
   what the guarded-rule discipline removes -- not as tidiness, but because it is on the path.
 
-Sequence, each step ending at a green cosim:
+#### The first half is done, and it bought nothing at the target
 
-1. **M as a stage.** X issues, M waits, W writes back. Brings a third forwarding source and a
-   load-use interlock -- the substance of the step, and where the bugs will be.
+`e755d61` put the bus request behind a register: `dbus.req.*` are register outputs, address
+generation ends at a flop, and `req_ready` is out of `stall` entirely. The instruction still occupies
+X until its access completes, so there is still one instruction in flight.
+
+| | before | after |
+|---|---|---|
+| `clk_sys` @ 13.5 (as shipped) | 14.98 MHz | **18.94 MHz** |
+| `clk_sys` @ 27 (the target) | 21.037 MHz | **21.034 MHz** |
+| Logic | 7686 | 7643 |
+| Registers | 2245 | 2305 |
+
+**The second row is the one that counts, and it did not move.** The 26% at the shipped constraint is
+the tool trying harder at a lazier target -- `clk_sys` already met 13.5 with slack to spare, so the
+placer stopped optimising. Against 27 MHz the path is the same length it was.
+
+It did find one bug, and it is the shape of the risk in anything further: with the register in,
+`take_uop` and the access completing stopped being the same cycle, so a memory op retired twice --
+once at completion and again on leaving X. The emulator was stepped twice and the RTL read one
+instruction behind. `mem_ack` distinguishes them now.
+
+#### What the path actually is, measured after that change
+
+The node list from the 27 MHz build, in order:
+
+```
+uop.src -> register file read -> load_addr[5..19]   <- the address adder's carry chain
+        -> access_addr -> mem_start -> stall -> writeback enables -> w_value, ADB
+```
+
+Read plainly: read a register, add the displacement, decide **from the result** whether the
+instruction may fire, and use that to enable the register file write. The adder is in the middle of
+the fire decision.
+
+**So decoupling X from M is not the remaining win, and step 1 below was the wrong diagnosis.**
+Decoupling changes *when* an instruction leaves X. It does not take the adder out of the fire
+decision, because fault precision requires knowing whether the access faults before anything
+commits -- which is a property of the ISA, not of the pipeline depth.
+
+Two links put the adder there, and both are narrow:
+
+- **`mem_start` is in `stall`** (`k2g_core.sv`, the `assign stall` line), and `stall` gates
+  `take_uop`, which gates the writeback enables;
+- **`detect_valid` is in the writeback gate**, and it contains `(is_load || is_store) && misaligned`
+  and `&& out_of_range`, both computed from `access_addr`.
+
+**Try this first, and measure before believing it.** A memory op never sets the general writeback
+enables -- a load writes back from `load_done`, a store writes nothing -- so both links are
+logically dead for every instruction that actually writes through that arm. Gating those enables on
+a signal that excludes `mem_start`, and hoisting the memory terms out of `detect_valid` on that path
+specifically, should be behaviour-identical and should take the adder off the endpoint. Two small
+edits -- and "behaviour-identical" is a claim, so it needs a build to confirm the path moved and a
+full cosim plus mutant sweep to confirm nothing else did.
+
+If the adder comes off and 27 MHz is still out of reach, the answer is **splitting execute itself**
+-- registering the ALU result separately from the writeback mux -- which is a larger change than the
+M decoupling and should be sized against a fresh measurement rather than against this section's
+original text.
+
+#### The rest of the sequence, unchanged in intent
+
+Each step ends at a green cosim:
+
+1. ~~**M as a stage.**~~ Half done (`e755d61`), and the remaining half is the two-link cut above
+   rather than decoupling X from M. Full decoupling -- X proceeding while M waits -- brings a third
+   forwarding source and a load-use interlock. It is worth doing for CPI, but it is not what stands
+   between here and 27 MHz.
 2. **Split the file** into `k2g_fetch.sv`, `k2g_exec.sv`, `k2g_lsu.sv`, `k2g_forward.sv`, leaving
-   `k2g_core.sv` as instantiation and wiring. Mechanical once (1) has drawn the boundary.
+   `k2g_core.sv` as instantiation and wiring.
 3. **Retire `stall`,** replacing it with a `*_can_fire` guard per stage.
 
 
