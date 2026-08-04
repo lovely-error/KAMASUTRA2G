@@ -38,9 +38,24 @@ module tb_icache;
   k2g_membus up ();     // the "core" side, driven below
   k2g_membus dn ();     // the memory side
 
+  logic inval_req = 1'b0;
+  logic inval_busy;
+
   k2g_icache #(.BYTES(BYTES), .LINE_BYTES(LINE_BYTES)) dut (
-      .clk(clk), .rst_n(rst_n), .up(up), .down(dn)
+      .clk(clk), .rst_n(rst_n), .up(up), .down(dn),
+      .inval_req(inval_req), .inval_busy(inval_busy)
   );
+
+  task automatic invalidate();
+    int n;
+    inval_req = 1'b1;
+    n = 0;
+    while (!inval_busy && n < 1000) begin @(posedge clk); n++; end
+    @(posedge clk);
+    inval_req = 1'b0;
+    @(posedge clk);
+    if (n >= 1000) fail("the invalidate never reported busy");
+  endtask
 
   // ---- memory, with latency so a refill is not instantaneous -------------
   logic [31:0] mem_addr, mem_wdata, mem_rdata;
@@ -252,6 +267,39 @@ module tb_icache;
     expect_eq("conflict refetched", rd_data, pattern(LC + 32'd4));
     checks++;
     if ((dn_requests - r0) != 1) fail("the conflict did not refetch");
+
+    // ---- ICINVR drops everything ----
+    // The half of ICINVR this cache is responsible for (spec 3.2). Every line
+    // must go, so the next fetch of anything comes from memory -- which is
+    // what makes a store to an instruction visible.
+    // Two different lines cached and confirmed hitting, so that "gone after the
+    // invalidate" means something. L0 was evicted by the conflict test above,
+    // so it has to be brought back first.
+    fetch(L0, rd_data, rd_cycles);
+    fetch(L1, rd_data, rd_cycles);
+    r0 = dn_requests;
+    fetch(L0, rd_data, rd_cycles);
+    fetch(L1, rd_data, rd_cycles);
+    checks++;
+    if (dn_requests != r0) fail("both lines should have been cached by now");
+
+    invalidate();
+
+    r0 = dn_requests;
+    fetch(L0, rd_data, rd_cycles);
+    expect_eq("refetched after invalidate", rd_data, pattern(L0));
+    checks++;
+    if ((dn_requests - r0) != 1)
+      fail($sformatf("after an invalidate the line took %0d refills, want 1",
+                     dn_requests - r0));
+
+    // The other line is gone too -- it invalidates everything, not just the
+    // line most recently touched.
+    r0 = dn_requests;
+    fetch(L1, rd_data, rd_cycles);
+    expect_eq("second line refetched", rd_data, pattern(L1));
+    checks++;
+    if ((dn_requests - r0) != 1) fail("the invalidate spared a line");
 
     // ---- never two in flight ----
     // Comparing totals at the end would be vacuous: every accepted request is

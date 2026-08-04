@@ -60,7 +60,14 @@ package k2g_types;
     UOP_PERFORM_JUMP,
     UOP_UNARY,
     UOP_HALT,
-    UOP_FAULT
+    UOP_FAULT,
+
+    // ICINVR + ST (spec 3.2). Not a store and not a no-op: it asks that
+    // everything this core has stored becomes visible to its own instruction
+    // fetch. The core does not know what caches exist -- it raises a request
+    // and waits -- so this is a barrier from `k2g_core`'s point of view and a
+    // cache walk from `k2g_cache_maint`'s.
+    UOP_ICINVR
   } uop_kind_e;
 
   typedef enum logic [1:0] { ARITH_ADD, ARITH_SUB, ARITH_MUL, ARITH_DIV } arith_e;

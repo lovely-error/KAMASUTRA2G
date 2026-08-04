@@ -411,8 +411,8 @@ LED:
 
 | | before PSRAM | with PSRAM |
 |---|---|---|
-| Logic | 4412 / 8640 (51%) | **7637 / 8640 (89%)** |
-| Registers | 1155 / 6771 (17%) | **2239 / 6771 (34%)** |
+| Logic | 4412 / 8640 (51%) | **7686 / 8640 (89%)** |
+| Registers | 1155 / 6771 (17%) | **2245 / 6771 (34%)** |
 | BSRAM | 7 / 26 (4 `k2g_mem` + 3 regfile) | **15 / 26** (4 IP + 3 regfile + 4 I$ + 4 D$) |
 | Bitstream | 3.5 MB | 3.5 MB |
 
@@ -460,7 +460,7 @@ runs on a divided clock. It is now a divide-by-**2** at **13.5 MHz**.
 | after Phase 2b, decode split out | **13.5 MHz** | **16.3 MHz** | **13** |
 | after Phase 3, memory is PSRAM | **13.5 MHz** | **17.99 MHz** | 22 |
 | after Phase 4b, with the I-cache | **13.5 MHz** | **15.85 MHz** | 24 |
-| after Phase 4c, with both caches | **13.5 MHz** | **14.35 MHz** | 22 |
+| after Phase 4c, with both caches | **13.5 MHz** | **14.98 MHz** | 20 |
 
 **Observed running on hardware** at 13.5 MHz after a rebuild and reflash, from
 the Phase 2b build.
@@ -472,8 +472,8 @@ Phase 3 added the memory domain. The design's own clocks all meet:
 | Clock | Constraint | Actual Fmax | Logic levels |
 |---|---|---|---|
 | `clk_27m` | 27.000 MHz | 120.7 MHz | 5 |
-| `clk_sys` | 13.500 MHz | 14.35 MHz | 22 |
-| `clk_out` (PSRAM user side) | 40.500 MHz | 55.39 MHz | 7 |
+| `clk_sys` | 13.500 MHz | 14.98 MHz | 20 |
+| `clk_out` (PSRAM user side) | 40.500 MHz | 47.79 MHz | 6 |
 
 **Every setup path closes.** That took regenerating the IP for a **81 MHz**
 memory clock, down from 135, which makes `clk_out` 40.5 MHz.
@@ -495,8 +495,8 @@ mostly does not own. 81 was picked over 108 to close the controller's INTERNAL
 | | at 135 MHz | at 81 MHz |
 |---|---|---|
 | setup violations | 29 | **0** |
-| `clk_out` | 64.63 against 67.50 | **55.39 against 40.50** |
-| `clk_sys` | 15.89 against 13.50 | 14.35 against 13.50 |
+| `clk_out` | 64.63 against 67.50 | **47.79 against 40.50** |
+| `clk_sys` | 15.89 against 13.50 | 14.98 against 13.50 |
 
 Two things worth keeping in view. `clk_sys` moved from 15.89 to 14.35 across
 that rebuild although nothing in its domain changed — that is placement spread

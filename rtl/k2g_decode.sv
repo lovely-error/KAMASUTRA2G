@@ -219,9 +219,15 @@ module k2g_decode
 
       // ---- stores, and the prefixes that replace them ----
       LB_ST: begin
-        if (pfx.icinvr || pfx.esp) begin
-          // Honoured as a no-op. Ignoring the prefix would perform a real
-          // store, which is a silent wrong answer rather than a missing
+        if (pfx.icinvr) begin
+          // Make this core's stores visible to its own instruction fetch
+          // (spec 3.2). Was a no-op while there were no caches; now it is
+          // real, and the operands naming a range are accepted and ignored --
+          // acting on a superset of the range is always safe.
+          main_uop.kind = UOP_ICINVR;
+        end else if (pfx.esp) begin
+          // Still honoured as a no-op. Ignoring the prefix would perform a
+          // real store, which is a silent wrong answer rather than a missing
           // feature (spec 3.2, 10).
           main_uop.kind = UOP_NOP;
         end else if (pfx.csp) begin

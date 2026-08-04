@@ -141,7 +141,7 @@ is exact, not an approximation.
 | `EP2_FLAG` | — | Operate on `flag_bit` instead of the value |
 | `EP2_CSP` | — | Redirect `LD`/`ST` to the I/O port space (§9) |
 | `EP2_MPI` / `EP2_MPD` | — | Reinterpret a comparison as a prefetch |
-| `EP2_ICINVR` | — | Reinterpret `ST` as an instruction-cache range invalidate |
+| `EP2_ICINVR` | — | Reinterpret `ST` as "make stores visible to fetch" over a range (§3.2.1) |
 | `EP1_ESP` | `gix` | Reinterpret `ST` as an export-memory-range |
 | `EP1_SS`/`SR`/`SL`/`LTL` | `gix` | Memory ordering (§11) |
 
@@ -162,11 +162,36 @@ silently performs a completely different operation:
 | `FLAG` + `AND`/`OR`/`XOR`/`NOT` | Boolean op on `flag_bit` | corrupt the register value |
 | `CSP` + `LD*` / `ST` | I/O port read / write | **access memory instead of a device** |
 | `MPD`/`MPI` + `TST` | Prefetch (a no-op) | **perform a real compare, writing a flag** |
-| `ICINVR` + `ST` | I-cache invalidate (a no-op) | **perform a real store** |
+| `ICINVR` + `ST` | Make stores visible to fetch (§3.2.1) | **perform a real store** |
 | `ESP` + `ST` | Export range (a no-op) | **perform a real store** |
 
 The last four are why §11's "cut" features cannot simply be ignored: the prefix must still be
 decoded and still suppress the main operation, even when the operation it names does nothing.
+
+### 3.2.1 `ICINVR` — making stores visible to fetch
+
+`ICINVR` + `ST` takes two register operands: `start` in the store's first field and `span` in its
+second, naming a byte range.
+
+> **It must make every store this core has performed to that range visible to that core's own
+> instruction fetch, and must not complete until it has.**
+
+That is stronger than the name suggests, and the difference matters on any machine with a
+write-back data cache. Invalidating the instruction cache alone is **not sufficient**: the
+instructions just written may still be sitting dirty in the data cache, so a refill reads a memory
+that has never been told about them. An implementation must therefore *clean* its data path over
+the range **before** invalidating its instruction path, and the ordering is part of the
+architecture rather than an implementation detail.
+
+Two permissions, so that a small implementation is not forced to build a range walker:
+
+- an implementation **may act on a superset** of the range, up to and including all of memory.
+  Cleaning or invalidating more than was asked cannot change results, only timing;
+- an implementation with no caches, or with caches that are coherent with fetch by construction,
+  **may treat it as a no-op** — the guarantee is already met. The emulator does exactly this.
+
+Self-modifying code is not portable without it. A program that writes instructions and jumps to
+them with no intervening `ICINVR` may execute either the old bytes or the new ones.
 
 ---
 
@@ -628,7 +653,8 @@ silent difference in results.
 | `F32` and all float ops | `FP_UNIMPLEMENTED` | Expensive on a 9K-LUT part, and the emulator's old float path was not IEEE-754 anyway (§11) |
 | `DIV` | `DIV_UNIMPLEMENTED` | Multi-cycle divider not worth the area; do it in software |
 | Ordering prefixes `LTL`/`SL`/`SS`/`SR` | Ignored; the load/store still happens. Sets `STICKY_STATUS.0` | Single core — ignoring them is semantically correct |
-| `ESP`, `ICINVR`, `MPI`/`MPD` | **Decoded and honoured as no-ops** | They *reinterpret* their main opcode; ignoring the prefix would perform a real store or compare (§3.2) |
+| `ESP`, `MPI`/`MPD` | **Decoded and honoured as no-ops** | They *reinterpret* their main opcode; ignoring the prefix would perform a real store or compare (§3.2) |
+| `ICINVR` | **Implemented** as of the two-cache machine | Cleans the whole data cache and invalidates the whole instruction cache, which is the superset §3.2.1 permits. Was a no-op while there were no caches, and correctly so |
 | Resumable traps | Halt instead | §8.2 |
 
 ---

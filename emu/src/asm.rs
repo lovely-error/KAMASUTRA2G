@@ -651,6 +651,24 @@ fn encode_stmt(st: &Stmt, ctx: &Ctx) -> R<Vec<u16>> {
 			out.extend_from_slice(&encode_st_mcr(reg_of(&ops[0], line)?, reg_of(&ops[1], line)?));
 		}
 
+		// ---- cache maintenance ----
+		// ICINVR + ST (spec 3.2): make this core's stores visible to its own
+		// instruction fetch. The two registers name a range; the hardware is
+		// permitted to act on a superset and currently acts on everything.
+		//
+		// Operand order follows the disassembler, `icinvr rStart, rSpan`, which
+		// in turn follows the decode: `start` is the ST's arg1 and `span` its
+		// arg2.
+		"icinvr" => {
+			need(2)?;
+			out.push(pack_6_5_5(LB::LB_EP1 as _, EP2::EP2_ICINVR as _, EP1::EP1_EP2 as _));
+			out.push(pack_6_5_5(
+				LB::LB_ST as _,
+				reg_of(&ops[0], line)?,
+				reg_of(&ops[1], line)?,
+			));
+		}
+
 		// ---- arithmetic and logic ----
 		"add" => alu(LB::LB_ADD, &mut out)?,
 		"sub" => alu(LB::LB_SUB, &mut out)?,

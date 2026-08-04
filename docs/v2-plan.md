@@ -644,7 +644,7 @@ reinterpreting prefix does not degrade gracefully:
 
 | Prefix | v1 | v2 |
 |---|---|---|
-| `ICINVR` + `ST` | decoded, no-op | **real** range operation |
+| `ICINVR` + `ST` | decoded, no-op | **real** — done, whole-cache rather than range (spec §3.2.1) |
 | `MPI` / `MPD` + `TST` | decoded, no-op | prefetch hint into I$ / D$ |
 | `ESP` + `ST` | decoded, no-op | stays a no-op |
 | `LTL`/`SL`/`SS`/`SR` | ignored, sets `STICKY_STATUS.0` | still ignored — single core, still correct |
@@ -655,10 +655,32 @@ instructions may still be sitting dirty in the D$ when the I$ refills from memor
 clean the D$ over the range and then invalidate the I$ over the range** — "make stores visible to
 fetch across this range". Spec §3.2 and §10 need widening to say so.
 
-**Gate:** cosim green; new `tb_icache` / `tb_dcache` green; a self-modifying-code program passes on
-both machines. **That program does not exist yet** — `emu/programs/` has nothing self-modifying, and
-it is the only test that proves the write-back D$ and the I$ agree, so it is part of the phase
-rather than a nice-to-have.
+**4d done — `ICINVR`.** Decoded into `UOP_ICINVR` rather than a no-op; the core raises a barrier
+request and stalls until it is answered; `rtl/k2g_cache_maint.sv` cleans the data cache, waits, and
+only then invalidates the instruction cache. 49 logic cells.
+
+The range operands are accepted and ignored — the caches are acted on whole. Spec §3.2.1, new,
+permits that explicitly, so narrowing later is invisible to software.
+
+**`emu/programs/selfmod.kasm`** is the program the gate asked for. It copies a code point the
+assembler emitted over another one, `icinvr`s, and jumps to it — no hard-coded encoding, so it
+cannot rot when opcode bits move. The emulator is coherent by construction and always prints 2; the
+RTL prints 2 only if the maintenance worked.
+
+Three mutants, all caught, and the middle one is why the test is not vacuous:
+
+    icinvr-decoded-as-a-nop              caught
+    icinvr-skips-the-dcache-clean        caught   <- the ordering property
+    icinvr-skips-the-icache-invalidate   caught
+
+**It found a real deadlock.** The core hung after 7 instructions: `cmaint_pending` clears when the
+caches report done, but the instruction has not retired yet, so the next cycle looked identical to
+the first and requested again forever. It needed a per-instruction completion latch cleared on
+`take_uop`. Reasoning did not find that; the program did.
+
+**Gate: met in simulation.** Cosim green (313615 comparisons) with `selfmod` in the sweep,
+`tb_icache` 82 checks, `tb_dcache` 88, 49 of 49 mutants, and the board builds with 0 setup
+violations. Not yet flashed.
 
 **4c done -- the data cache.** `rtl/k2g_dcache.sv`: same geometry, write-back, write-allocate, with
 a dirty bit per line and a victim writeback that is one 32-beat write burst driven out of the data

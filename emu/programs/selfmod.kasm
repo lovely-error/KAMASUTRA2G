@@ -1,0 +1,82 @@
+; selfmod.kasm -- write an instruction, then execute it.
+;
+; This is the only program that proves the two caches agree, and it is the gate
+; on Phase 4 of docs/v2-plan.md. Everything else in emu/programs/ leaves its own
+; code alone, so a data cache that never wrote back and an instruction cache
+; that never invalidated would both pass the entire suite.
+;
+; WHY IT NEEDS ICINVR, concretely. The machine has a write-back data cache in
+; front of an instruction cache. A store to an instruction lands in the data
+; cache and stops there -- memory does not have it. Fetch asks the instruction
+; cache, which either still holds the old bytes or refills them from a memory
+; that was never told. Two caches, each behaving correctly, and the program
+; executes what it overwrote.
+;
+; `icinvr` closes that: clean the data cache, then drop the instruction cache,
+; in that order (spec 3.2). Both halves are needed and the order is not
+; optional -- dropping the I-cache first only refills the stale bytes sooner.
+;
+; THE PATCH DOES NOT HARD-CODE AN ENCODING. It copies a code point the
+; assembler generated at `replacement` over the one at `target`, so the test
+; cannot rot when an opcode's bits move. Both are `puc8 r1, <digit>`, which is
+; a single code point, so one 16-bit store replaces exactly one instruction and
+; the stream stays aligned.
+;
+; Prints "2" if the patched instruction ran and "1" if the original did. The
+; emulator has no caches and is coherent by construction, so it always prints
+; 2; the RTL prints 2 only if ICINVR did its job. Under cosimulation a machine
+; that skipped the maintenance diverges on r1 and on the UART stream.
+
+UART_DATA = 0x00
+
+        .org    0
+
+start:
+        puc32   r10, UART_DATA
+
+        ; ---- patch `target` with the code point at `replacement` ----
+        ; ld16 tags r3 as a halfword, and a store takes its width from the
+        ; source register's tag (spec 5.3), so this writes exactly two bytes.
+        puc32   r2, replacement
+        ld16    r3, [r2]
+        puc32   r4, target
+        st      [r4], r3
+
+        ; ---- make the store visible to fetch ----
+        ; Without this the RTL runs the pre-patch instruction and prints 1.
+        ; The range operands are what the ISA names, so they are passed
+        ; honestly -- r5 start, r6 span -- even though this implementation is
+        ; permitted to act on a superset and does.
+        puc32   r5, target
+        puc32   r6, 4
+        icinvr  r5, r6
+
+        ; ---- run it ----
+        dispil  r30, target
+        tc
+
+        add     r1, '0'
+        rdt     r1, u8
+        out     r10, r1
+        puc32   r7, 13
+        out     r10, r7
+        puc32   r7, 10
+        out     r10, r7
+        halt
+
+; ---------------------------------------------------------------------------
+; The routine that gets patched. Its first code point is overwritten by the one
+; at `replacement`; everything after it is untouched.
+; ---------------------------------------------------------------------------
+        .align  4
+target:
+        puc8    r1, 1
+        dispa   r30
+        tc
+
+; The code point copied over `target`. Never executed -- it exists only to make
+; the assembler emit the encoding, so nothing here depends on what that
+; encoding is.
+        .align  4
+replacement:
+        puc8    r1, 2

@@ -219,6 +219,10 @@ module k2g_soc
   wire logic cpu_rst_n = sys_rst_n && !booting;
 
   // ---- memory ------------------------------------------------------------
+  logic cmaint_req, cmaint_done;
+  logic dflush_req, dflush_busy;
+  logic iinval_req, iinval_busy;
+
   // ---- data cache ---------------------------------------------------------
   // Between the core and the mux, so the boot copier writes straight past it.
   // That is what it has to do: the copier is laying down the program while the
@@ -236,8 +240,8 @@ module k2g_soc
       .rst_n     (cpu_rst_n),
       .up        (dbus),
       .down      (dbus_mem),
-      .flush_req (1'b0),
-      .flush_busy()
+      .flush_req (dflush_req),
+      .flush_busy(dflush_busy)
   );
 
   k2g_membus_mux u_dmux (
@@ -331,10 +335,12 @@ module k2g_soc
   k2g_membus ibus_mem ();
 
   k2g_icache u_icache (
-      .clk  (clk_sys),
-      .rst_n(cpu_rst_n),
-      .up   (ibus),
-      .down (ibus_mem)
+      .clk       (clk_sys),
+      .rst_n     (cpu_rst_n),
+      .up        (ibus),
+      .down      (ibus_mem),
+      .inval_req (iinval_req),
+      .inval_busy(iinval_busy)
   );
 
   k2g_psram u_psram (
@@ -389,7 +395,25 @@ module k2g_soc
       .fault_cause_o(fault_cause_o),
       .fault_addr_o (fault_addr_o),
       .fault_info_o (fault_info_o),
-      .cycle_count_o(cycle_count_o)
+      .cycle_count_o(cycle_count_o),
+      .cmaint_req   (cmaint_req),
+      .cmaint_done  (cmaint_done)
+  );
+
+  // ---- ICINVR ------------------------------------------------------------
+  // The core asks for its stores to become visible to its own fetch; this is
+  // what that costs here. Order matters and is enforced inside: clean the data
+  // cache first, because the instructions just written are sitting dirty in
+  // it, and only then drop the instruction cache.
+  k2g_cache_maint u_cmaint (
+      .clk        (clk_sys),
+      .rst_n      (cpu_rst_n),
+      .req        (cmaint_req),
+      .done       (cmaint_done),
+      .dflush_req (dflush_req),
+      .dflush_busy(dflush_busy),
+      .iinval_req (iinval_req),
+      .iinval_busy(iinval_busy)
   );
 
   // ---- UART --------------------------------------------------------------

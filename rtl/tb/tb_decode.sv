@@ -185,8 +185,12 @@ module tb_decode
 
     // The three prefixes that turn their main opcode into a no-op. Getting
     // these wrong performs a real store or compare (spec 3.2).
+    // Was a no-op while there were no caches. It is now a real operation: make
+    // this core's stores visible to its own instruction fetch (spec 3.2). What
+    // it must never be is a STORE -- ignoring the prefix writes memory.
     feed('{p655(LB_EP1, EP2_ICINVR, EP1_EP2), p655(LB_ST, 5'd1, 5'd2)}, "icinvr");
-    check("icinvr+st is a nop", last.kind == UOP_NOP);
+    check("icinvr+st is a cache-maintenance op", last.kind == UOP_ICINVR);
+    check("icinvr+st is not a store", last.kind != UOP_STORE);
     feed('{p655(LB_EP1, 5'd0, EP1_ESP), p655(LB_ST, 5'd1, 5'd2)}, "esp");
     check("esp+st is a nop", last.kind == UOP_NOP);
     feed('{p655(LB_EP1, EP2_MPD, EP1_EP2), p655(LB_TST, 5'd1, 5'd2)}, "pfd");

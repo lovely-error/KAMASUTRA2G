@@ -66,7 +66,18 @@ module k2g_icache #(
     input logic rst_n,
 
     k2g_membus.slave  up,     // from the core's fetch port
-    k2g_membus.master down    // to memory
+    k2g_membus.master down,   // to memory
+
+    // Drop every line, so the next fetch of anything comes from memory.
+    // Driven by `k2g_cache_maint` for ICINVR (spec 3.2), AFTER the data cache
+    // has written its dirty lines back -- the order is the whole point, and it
+    // is enforced there rather than here.
+    //
+    // One cycle: the valid bits are flops and clear together. `busy` exists
+    // only so the sequencer's handshake is the same shape as the data cache's,
+    // which takes hundreds.
+    input  logic inval_req,
+    output logic inval_busy
 );
 
   localparam int LINES  = BYTES / LINE_BYTES;      // 64
@@ -101,7 +112,12 @@ module k2g_icache #(
   logic [TAG_W-1:0]  fill_tag;
   logic [4:0]        fill_cnt;
 
-  assign up.req_ready = (state == S_IDLE) && hit;
+  assign up.req_ready = (state == S_IDLE) && !inval_req && hit;
+
+  // Never busy for longer than the cycle it is asked, because clearing 64 flops
+  // takes one. Held to the request so a sequencer that waits for a rise sees
+  // one.
+  assign inval_busy = inval_req;
 
   assign down.req_valid = (state == S_REQ);
   assign down.req.addr  = fill_base;
@@ -161,7 +177,9 @@ module k2g_icache #(
       fill_cnt  <= 5'd0;
     end else begin
       unique case (state)
-        S_IDLE: if (up.req_valid && !hit) begin
+        S_IDLE: if (inval_req) begin
+          valid <= '0;
+        end else if (up.req_valid && !hit) begin
           // REDUNDANT, and kept deliberately. Nothing can read this line while
           // it fills -- `req_ready` is false for the whole refill, which is
           // what actually makes the window safe -- and a reset mid-refill

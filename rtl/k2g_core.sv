@@ -69,7 +69,14 @@ module k2g_core
     output logic [4:0]  fault_cause_o,
     output logic [31:0] fault_addr_o,
     output logic [31:0] fault_info_o,
-    output logic [63:0] cycle_count_o
+    output logic [63:0] cycle_count_o,
+
+    // Cache maintenance, for ICINVR (spec 3.2). A barrier from this module's
+    // point of view: raise it, wait for `done`, and know that everything
+    // stored is visible to fetch. What it costs is `k2g_cache_maint`'s
+    // business, and a machine with no caches may tie `done` to `req`.
+    output logic        cmaint_req,
+    input  logic        cmaint_done
 );
 
   // ---- fetch -------------------------------------------------------------
@@ -117,6 +124,18 @@ module k2g_core
   // X's multi-cycle states, declared here because the CSP request has to know
   // that something else is already holding the instruction.
   logic        mem_pending, mulw_pending;
+
+  // ICINVR is in flight: the request is out and the caches have not reported
+  // done. Declared here with the other multi-cycle states because the stall
+  // expression and the CSP guard both have to see it.
+  logic        cmaint_pending;
+
+  // ...and this instruction's maintenance has already completed. Without it
+  // the request restarts forever: `cmaint_pending` clears when the caches
+  // report done, but the instruction has not retired yet, so the next cycle
+  // looks exactly like the first one and asks again. Cleared when the
+  // instruction leaves X.
+  logic        cmaint_ack;
 
   // Declared here rather than with the rest of the sequential state because
   // the bus requests below have to know the machine is stopped.
@@ -533,6 +552,7 @@ module k2g_core
   // ---- memory access -----------------------------------------------------
   wire logic        is_load     = (uop.kind == UOP_LOAD);
   wire logic        is_store    = (uop.kind == UOP_STORE);
+  wire logic        is_icinvr   = (uop.kind == UOP_ICINVR);
   wire logic [31:0] load_addr   = xb_value + uop.imm;
   wire logic [31:0] store_addr  = xa_value + uop.imm;
   wire logic [31:0] access_addr = is_load ? load_addr : store_addr;
@@ -679,7 +699,22 @@ module k2g_core
   // load writes back, and the value array has exactly one write port
   // (k2g_regfile.sv) -- letting the next instruction retire alongside would
   // put two writes on it.
+  // ---- ICINVR (spec 3.2) -------------------------------------------------
+  // "Make my stores visible to my own instruction fetch." The core does not
+  // know what caches exist; it asks and waits, and `k2g_cache_maint` decides
+  // what that costs. Stalling until it finishes is what makes the guarantee
+  // real -- retiring early would let the next instruction fetch before the
+  // invalidate landed, which is the one thing this instruction is for.
+  //
+  // Predicated off, it is a no-op like any other instruction: `cond_met` gates
+  // the request, not just the effect.
+  wire logic cmaint_start = uop_valid && cond_met && is_icinvr && !halted_r &&
+                            !cmaint_pending && !cmaint_ack;
+
+  assign cmaint_req = cmaint_start || cmaint_pending;
+
   assign stall = mem_pending || mulw_pending || csp_stall ||
+                 cmaint_start || cmaint_pending ||
                  (mem_access && !dbus.req_ready);
 
   // ---- jump latch --------------------------------------------------------
@@ -1042,6 +1077,8 @@ module k2g_core
       cycle_count     <= 64'd0;
       mem_pending     <= 1'b0;
       mulw_pending    <= 1'b0;
+      cmaint_pending  <= 1'b0;
+      cmaint_ack      <= 1'b0;
       pend_dst        <= 5'd0;
       pend_tag        <= RDT_U32;
       pend_lo         <= 32'd0;
@@ -1055,6 +1092,16 @@ module k2g_core
       // than unconditionally on the next edge.
       if (load_done) mem_pending <= 1'b0;
       mulw_pending <= 1'b0;
+
+      // Held from the cycle the request goes out until the caches answer,
+      // however many hundreds of cycles that is.
+      if (cmaint_start)     cmaint_pending <= 1'b1;
+      else if (cmaint_done) cmaint_pending <= 1'b0;
+
+      // `take_uop` is the instruction leaving X, which is the only thing that
+      // makes a fresh ICINVR distinguishable from the one just finished.
+      if (take_uop)         cmaint_ack <= 1'b0;
+      else if (cmaint_done) cmaint_ack <= 1'b1;
 
       if (start_load) begin
         mem_pending  <= 1'b1;

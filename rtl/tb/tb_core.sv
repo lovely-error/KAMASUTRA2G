@@ -35,6 +35,12 @@ module tb_core
   logic        retire_valid;
   retire_t     retire;
 
+  // No caches in this testbench, so ICINVR has nothing to do and completes the
+  // cycle it is asked. The instruction is still decoded and still stalls for a
+  // cycle, which is what spec 3.2.1 permits a coherent machine to do.
+  logic        cmaint_req;
+  wire  logic  cmaint_done = cmaint_req;
+
   int unsigned latency  = 0;
   int unsigned ilatency = 0;
 

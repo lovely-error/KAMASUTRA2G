@@ -160,7 +160,7 @@ else
     # cosimulation is the only thing that ever looks at them. fault_condcode
     # is for the cause, which used to be ILLEGAL_OPCODE here and
     # ILLEGAL_PREFIX_COMBO in the RTL.
-    all_programs="hello fib hazard
+    all_programs="hello fib hazard selfmod
                   f32_operand f32_store f32_predicate f32_escape f32_csp
                   fault_access fault_store fault_range fault_port fault_fetch
                   fault_squashed fault_unpredicated

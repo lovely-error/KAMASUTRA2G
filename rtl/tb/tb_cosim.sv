@@ -92,6 +92,9 @@ module tb_cosim
   logic [63:0] cycle_count_o;
   logic        retire_valid;
   retire_t     retire;
+  logic        cmaint_req, cmaint_done;
+  logic        iinval_req, iinval_busy;
+  logic        cm_dflush_req;
 
   k2g_membus dbus ();
   k2g_membus ibus ();
@@ -122,14 +125,18 @@ module tb_cosim
   assign ibus.req_ready     = ibus_mem.req_ready;
   assign ibus.rsp_valid     = ibus_mem.rsp_valid;
   assign ibus.rsp_data      = ibus_mem.rsp_data;
+  assign iinval_busy        = 1'b0;
 `else
   k2g_icache u_icache (
-      .clk  (clk),
-      .rst_n(rst_n),
-      .up   (ibus),
-      .down (ibus_mem)
+      .clk       (clk),
+      .rst_n     (rst_n),
+      .up        (ibus),
+      .down      (ibus_mem),
+      .inval_req (iinval_req),
+      .inval_busy(iinval_busy)
   );
 `endif
+
 
   // The fetch port is read-only, so the same model serves it: `we` is always
   // zero. Responses are whole words on both ports now -- the core picks the
@@ -162,16 +169,35 @@ module tb_cosim
   assign dbus.rsp_valid     = dbus_mem.rsp_valid;
   assign dbus.rsp_data      = dbus_mem.rsp_data;
   assign dflush_busy        = 1'b0;
+  // No caches, so ICINVR has nothing to do and completes the cycle it is
+  // asked. The instruction is still decoded and still stalls for a cycle,
+  // which is what makes the two configurations comparable.
+  assign cmaint_done        = cmaint_req;
 `else
   k2g_dcache u_dcache (
       .clk       (clk),
       .rst_n     (rst_n),
       .up        (dbus),
       .down      (dbus_mem),
-      .flush_req (dflush_req),
+      .flush_req (dflush_req || cm_dflush_req),
       .flush_busy(dflush_busy)
   );
+
+  // ICINVR, sequenced exactly as the SoC does it: clean the data cache, then
+  // drop the instruction cache. `dflush_req` above is the testbench's own
+  // end-of-run flush, which shares the same port.
+  k2g_cache_maint u_cmaint (
+      .clk        (clk),
+      .rst_n      (rst_n),
+      .req        (cmaint_req),
+      .done       (cmaint_done),
+      .dflush_req (cm_dflush_req),
+      .dflush_busy(dflush_busy),
+      .iinval_req (iinval_req),
+      .iinval_busy(iinval_busy)
+  );
 `endif
+
 
   k2g_mem_slow u_slow (
       .clk        (clk),

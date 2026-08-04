@@ -404,6 +404,30 @@ detect
 -
 cosim0
 --
+icinvr-decoded-as-a-nop
+k2g_decode.sv
+          main_uop.kind = UOP_ICINVR;
+          main_uop.kind = UOP_NOP;
+detect
+selfmod
+cosim1
+--
+icinvr-skips-the-dcache-clean
+k2g_cache_maint.sv
+        S_IDLE:    if (req)            state <= S_D_START;
+        S_IDLE:    if (req)            state <= S_I_START;
+detect
+selfmod
+cosim1
+--
+icinvr-skips-the-icache-invalidate
+k2g_cache_maint.sv
+        S_D_WAIT:  if (!dflush_busy)   state <= S_I_START;
+        S_D_WAIT:  if (!dflush_busy)   state <= S_DONE;
+detect
+selfmod
+cosim1
+--
 copier-ignores-backpressure
 board/k2g_soc.sv
     end else if (booting && cbus.req_ready) begin
