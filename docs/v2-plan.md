@@ -110,7 +110,7 @@ Measured cost: SoC 4695 → 4670 LUTs, 758 → 772 registers. Free.
 
 ---
 
-## Phase 1 — the channel primitive and the memory contract 🔶 data side done
+## Phase 1 — the channel primitive and the memory contract ✅ done
 
 **Goal:** every interface that will later have variable latency has it now, before anything real
 is variable.
@@ -147,7 +147,25 @@ result in the plan.
 
 ---
 
-## Phase 2 — the five-stage pipeline
+## Phase 2 — the five-stage pipeline 🔶 F/D/X/W done, M and the split are not
+
+**What is actually left, because nothing above said so.** 2a, 2b and 2c landed and 2d was reverted,
+but the phase as written is not finished and the gap is easy to miss while reading only the
+sub-sections:
+
+- **There is no M stage.** Memory is still folded into X through `mem_pending`, so the machine is
+  F/D/X/W. That is why a load still holds the front end.
+- **The global `stall` is still there**, at `k2g_core.sv`'s `assign stall = mem_pending || ...`. The
+  phase says it "disappears rather than being carried forward and renamed"; it has been carried
+  forward.
+- **`k2g_core.sv` was never split** into `k2g_fetch.sv`, `k2g_exec.sv`, `k2g_lsu.sv` and
+  `k2g_forward.sv`. It is one 1000-line file.
+- **`CLK_DIV` is 2, not 1.** `clk_sys` places at 17.99 MHz against the 27 needed. That number
+  belongs to this phase and appears in the Decisions list at the top, so it is the phase's own
+  target rather than a stretch goal.
+
+None of it blocks Phase 4 — a cache sits behind `k2g_membus` and does not care how many stages are
+in front of it — which is why the order of work has not changed. But "Phase 2 done" is not true.
 
 **Goal:** break the 28-level path. Still on BSRAM; no caches yet.
 
@@ -564,16 +582,28 @@ points were. That is what Phase 4 is for.
   `clk_out` from the IP sources rather than assuming them.
 - **Data arrays reuse `k2g_mem.sv`'s shape** — four byte lanes, one DPB each, instantiated not
   inferred. That structure exists because Gowin BSRAM has no per-byte write enables, and it is
-  exactly what a cache data array needs. 8 blocks of the 22 free.
-- **A refill takes a bus lock.** `k2g_membus` carries one beat per request and has no burst length,
-  so the requests of a 128-byte line fill are not marked as one thing. The refilling master
-  holds the bus across the whole run. A line half-filled from two addresses is undetectable
-  afterwards — it answers wrong forever, from a tag that says it is valid. The full reasoning is
-  in `rtl/k2g_membus.sv`; the lock is the first thing to write, before either cache.
-- Tags in flip-flops: 23-bit space, 7-bit index, 6-bit offset → 10 tag bits + valid (+ dirty) ×
-  128 lines. 64-byte rather than 32-byte lines halve that: 128 entries instead of 256, which is
-  about 3000 flip-flops saved across the two caches against a 6480 budget. That, not bandwidth, is
-  why the IP's burst is 64 — both burst sizes have ample bandwidth for a 13.5 MHz core.
+  exactly what a cache data array needs. **8 blocks of the 19 free** — the PSRAM controller holds
+  four permanently and the register file three.
+- **~~A refill takes a bus lock.~~ 4a done — a burst is one transaction.** `mem_req_t` carries
+  `len`, a refill is one request of 32 words and one PSRAM command, and the lock is gone rather
+  than replaced: atomicity is a property of the request, so a slave can count beats and check. The
+  reasoning and the reversal are in `rtl/k2g_membus.sv`.
+
+  The lock was the right answer while the slave behind the bus was BSRAM. It stopped being one when
+  `k2g_bsram_port` was deleted — the only slave left already counts beats — and when the surviving
+  slave turned out to cost 6.6 core cycles per request, making a 32-request line fill ~211 cycles
+  against the 7 of one burst. The rejected option became free at the same time the accepted one
+  became thirty times too slow.
+
+  Also in this step, because the burst forced it: **the fetch port's halfword select moved into the
+  core.** Both bus ports answer with whole words now, which is what lets an I-cache be an ordinary
+  master — a refill wants words. `k2g_mem` port A widened to match.
+- Tags in flip-flops. **The arithmetic below was written for 64-byte lines and is wrong for 128:**
+  23-bit space, 7-bit offset, 6-bit index → **10 tag bits + valid (+ dirty) × 64 lines**, about 768
+  flip-flops for the I$ and 832 for the D$. `docs/bring-up.md` has the corrected derivation. Bigger
+  lines are what keep that small — halving the line size doubles the entries — and bandwidth is not
+  the reason for the choice either way: even 54 MHz of memory clock has an order of magnitude more
+  than a 13.5 MHz core can use.
 
 **Four currently-no-op prefixes become real hardware.** Spec §3.2 warns that ignoring a
 reinterpreting prefix does not degrade gracefully:
@@ -592,16 +622,34 @@ clean the D$ over the range and then invalidate the I$ over the range** — "mak
 fetch across this range". Spec §3.2 and §10 need widening to say so.
 
 **Gate:** cosim green; new `tb_icache` / `tb_dcache` green; a self-modifying-code program passes on
-both machines.
+both machines. **That program does not exist yet** — `emu/programs/` has nothing self-modifying, and
+it is the only test that proves the write-back D$ and the I$ agree, so it is part of the phase
+rather than a nice-to-have.
+
+**Where the logic budget stands before either cache is written: 6526 / 8640, 76%.** That leaves 2114
+cells for two caches, and the levers if it does not fit are, in order, cache size, tag width, then
+the register file's third read port. Synthesize the I-cache on its own before wiring it, the way
+`k2g_psram` was measured at 362.
 
 ---
 
 ## Risks
 
-- **Logic utilization is the binding constraint, not BSRAM.** v1 is at 55% of 8640 LUTs before a
-  pipeline, two caches, a CDC FIFO and the PSRAM IP. BSRAM is comfortable (8 of 22 free blocks);
-  LUTs may not be. Synthesize each module as it is written and record the number. If it overflows,
-  the levers in order are cache size, tag width, then the register file's third read port.
+- **Logic utilization is the binding constraint, not BSRAM.** v1 was at 55% of 8640 before a
+  pipeline, two caches, a CDC FIFO and the PSRAM IP; it is at **76%** with everything but the
+  caches. BSRAM is comfortable (19 of 26 free, 8 needed); LUTs are not. Synthesize each module as
+  it is written and record the number. If it overflows, the levers in order are cache size, tag
+  width, then the register file's third read port.
+- **`clk_out` has 0.7% margin, and this module does not own the path.** 67.98 MHz against a 67.500
+  requirement. The worst path starts inside the controller's temperature auto-adjust logic and
+  comes out through `rd_data` into the adapter's line buffer, so almost all of it is the IP's;
+  registering the boundary to remove the adapter's share was tried twice and made the number worse
+  both times (66.05 MHz, forty more failing endpoints), because synthesis retimes the stage back
+  out unless forced and gains nothing when it is. The `psram` bring-up stage reports 67.196 against
+  the same requirement — a violation — and runs on hardware, so the report is not a reliable guide
+  here either. **The lever is a lower memory clock**, which costs nothing measurable: even 54 MHz
+  has an order of magnitude more bandwidth than a 13.5 MHz core can use. Worth pulling if anything
+  in that domain ever misbehaves on a board.
 - **The register file moved into 3 BSRAM blocks at 2b — investigated, and it is a win.** The
   netlist has three `SDPB`, one per read port, holding the value array. Cause: registering the uop
   gave synthesis a *registered read address*, which is exactly the shape a synchronous BSRAM read
@@ -674,6 +722,12 @@ The third is the one that matters. New verification this plan adds:
   same blind spot as the testbench that held `uart_tx_ready` high forever and let a flow-control
   bug reach hardware.
 - **`rtl/tb/tb_chan.sv`** — the channel primitive under full/empty/backpressure.
+- **`rtl/tb/tb_psram_adapter.sv`** — the adapter against a behavioural controller
+  (`k2g_psram_model.sv`), which also *checks*: minimum command interval, no command before
+  calibration, none into a burst still streaming.
+- **`rtl/tb/tb_soc.sv`** — the whole SoC booting out of PSRAM, against that model and a behavioural
+  `rPLL`. Every byte of the boot ROM is compared against a second instance of `k2g_rom`, so the
+  test does not care which program is loaded.
 - **`rtl/tb/tb_icache.sv`, `rtl/tb/tb_dcache.sv`** — hit, miss, eviction, dirty writeback, `ICINVR`
   range, `MPI`/`MPD` prefetch.
 - **A self-modifying-code program** in `emu/programs/`, run under cosim. The only test that proves

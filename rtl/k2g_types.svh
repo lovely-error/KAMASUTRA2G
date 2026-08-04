@@ -156,8 +156,13 @@ package k2g_types;
   // and the memory is byte-striped for exactly that reason (see k2g_mem.sv),
   // so a width code would only be decoded back into the lanes it came from.
   // `we == 0` is a read.
+  //
+  // `len` is beats minus one, so 0 is an ordinary single-word access and 31 is
+  // a 128-byte cache line -- one PSRAM burst. The full contract, including
+  // where a burst's write data rides, is in k2g_membus.sv.
   typedef struct packed {
     logic [31:0] addr;
+    logic [4:0]  len;
     logic [3:0]  we;
     logic [31:0] wdata;
   } mem_req_t;

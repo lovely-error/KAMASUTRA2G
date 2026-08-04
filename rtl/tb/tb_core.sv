@@ -19,7 +19,7 @@ module tb_core
   always #5 clk = ~clk;
 
   logic [31:0] imem_addr, dmem_addr, dmem_wdata, gpio_out;
-  logic [15:0] imem_data;
+  logic [31:0] imem_data;
   logic [31:0] dmem_rdata;
   logic        imem_en, dmem_en;
   logic [3:0]  dmem_we;
@@ -52,7 +52,7 @@ module tb_core
       .b_en       (imem_en),
       .b_we       (),
       .b_wdata    (),
-      .b_rdata    ({16'd0, imem_data})
+      .b_rdata    (imem_data)
   );
 
   k2g_mem_slow u_slow (

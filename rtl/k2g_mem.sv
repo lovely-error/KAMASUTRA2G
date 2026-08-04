@@ -5,11 +5,17 @@
 // forced -- and it happens to give exactly the per-byte store granularity the
 // tag-driven store width needs (spec 5.3).
 //
-//   port A: instruction fetch, 16-bit read, read-only
+//   port A: instruction fetch, 32-bit read, read-only
 //   port B: data access, 8/16/32-bit read and write
 //
-// A 16-bit fetch at halfword `h` needs bytes 2h and 2h+1, which always sit in
-// the same 32-bit word, so one word index drives all four lanes.
+// PORT A RETURNS THE WHOLE WORD. It used to return the addressed halfword,
+// because fetch wanted a code point and the select was free here -- but that
+// made the fetch port a different shape from every other master on
+// `k2g_membus`, and an instruction cache refilling a line wants words. The
+// select moved into the core, which already has the address beside each
+// answer. See k2g_membus.sv.
+//
+// Only testbenches instantiate this now; `k2g_soc`'s memory is PSRAM.
 //
 // THE BSRAM IS INSTANTIATED, NOT INFERRED. Inference produced a true dual-port
 // block with WRITE_MODE = 2'b10 (read-before-write), which the primitive does
@@ -32,7 +38,7 @@ module k2g_mem #(
     // Port A -- instruction fetch.
     input  logic [31:0] a_addr,          // byte address, halfword aligned
     input  logic        a_en,
-    output logic [15:0] a_data,
+    output logic [31:0] a_data,          // the whole word; the core selects
 
     // Port B -- data.
     input  logic [31:0] b_addr,          // byte address
@@ -50,18 +56,15 @@ module k2g_mem #(
 
   logic [7:0] a_q0, a_q1, a_q2, a_q3;
   logic [7:0] b_q0, b_q1, b_q2, b_q3;
-  logic       a_half_q;
 
-  // The addressed halfword of the fetched word.
-  assign a_data  = a_half_q ? {a_q3, a_q2} : {a_q1, a_q0};
+  assign a_data  = {a_q3, a_q2, a_q1, a_q0};
   assign b_rdata = {b_q3, b_q2, b_q1, b_q0};
 
-  // Gated by `a_en` exactly like the fetched data. Updating it unconditionally
-  // desynchronizes the halfword select from the word during a stall, which
-  // fetches the wrong half and sends the PC into the middle of an instruction.
-  always_ff @(posedge clk) begin
-    if (a_en) a_half_q <= a_addr[1];
-  end
+  // There used to be a registered halfword select here, gated by `a_en` for
+  // the same reason the data is -- updating it unconditionally desynchronized
+  // it from the word during a stall and fetched the wrong half. It went with
+  // the select itself; the core pairs each answer with its own address now, so
+  // there is nothing left here to keep in step.
 
 `ifdef SIMULATION
   // ---- behavioural model ------------------------------------------------

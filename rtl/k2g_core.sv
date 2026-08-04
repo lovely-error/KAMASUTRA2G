@@ -37,13 +37,14 @@ module k2g_core
     input  logic        clk,
     input  logic        rst_n,
 
-    // Instruction fetch port. Read-only; the code point is the low halfword
-    // of each response.
+    // Instruction fetch port. Read-only, and a response is a 32-bit WORD --
+    // the code point is selected from it here, by bit 1 of the address that
+    // was asked for. See the fetch section.
     k2g_membus.master   ibus,
 
     // Data port. A channel rather than a fixed one-cycle access: what answers
-    // it is BSRAM today and a write-back data cache over PSRAM later, and the
-    // core must not care which.
+    // it is PSRAM directly today and a write-back data cache over PSRAM later,
+    // and the core must not care which.
     k2g_membus.master   dbus,
 
     // UART, through the CSP port space.
@@ -146,6 +147,10 @@ module k2g_core
   assign ibus.req.addr  = pc;
   assign ibus.req.we    = 4'b0000;
   assign ibus.req.wdata = 32'd0;
+  // One word at a time. The core never bursts -- that is the instruction
+  // cache's business, and it will sit here as an ordinary master and burst on
+  // its own account (k2g_membus.sv).
+  assign ibus.req.len   = 5'd0;
 
   wire logic if_issue  = ibus.req_valid && ibus.req_ready;
   wire logic if_answer = ibus.rsp_valid;
@@ -171,7 +176,23 @@ module k2g_core
   // above guarantees the buffer has room -- which is the only reason a
   // response with no `ready` can drive a channel at all.
   assign f2d_in.valid = if_answer && (drop == 3'd0);
-  assign f2d_in.data  = {issue_addr[issue_rp], ibus.rsp_data[15:0]};
+
+  // THE HALFWORD SELECT LIVES HERE, not in whatever answers the bus. A
+  // response is a 32-bit word and a code point is sixteen bits of it, chosen
+  // by bit 1 of the address that was requested -- which is sitting right here
+  // already, because `issue_addr` has to pair each answer with its address
+  // anyway. Doing it at this end costs one mux and makes the two bus ports
+  // identical, which is what lets an instruction cache be an ordinary master:
+  // a refill wants words, not halfwords.
+  //
+  // It used to be the memory's job -- `k2g_mem` port A was a halfword port --
+  // and `k2g_psram` inherited it, carrying the request's bit 1 across a clock
+  // domain to do nothing else with.
+  wire logic [31:0] ans_addr = issue_addr[issue_rp];
+  wire logic [15:0] ans_cp   = ans_addr[1] ? ibus.rsp_data[31:16]
+                                           : ibus.rsp_data[15:0];
+
+  assign f2d_in.data  = {ans_addr, ans_cp};
 
   k2g_chan #(.WIDTH(48)) f2d_mid ();
 
@@ -631,6 +652,7 @@ module k2g_core
   assign dbus.req.addr  = access_addr;
   assign dbus.req.we    = is_store ? store_we : 4'b0000;
   assign dbus.req.wdata = store_data;
+  assign dbus.req.len   = 5'd0;          // as above: the data cache bursts, not this
 
   // A CSP access that cannot complete holds the instruction instead of
   // retiring it, and so does a memory access the bus has not accepted or not

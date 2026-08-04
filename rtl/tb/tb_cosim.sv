@@ -69,7 +69,7 @@ module tb_cosim
   always #5 clk = ~clk;
 
   logic [31:0] imem_addr, dmem_addr, dmem_wdata, gpio_out;
-  logic [15:0] imem_data;
+  logic [31:0] imem_data;
   logic [31:0] dmem_rdata;
   logic        imem_en, dmem_en;
   logic [3:0]  dmem_we;
@@ -98,8 +98,9 @@ module tb_cosim
 
   k2g_core #(.MEM_BYTES(MEM_BYTES)) dut (.*);
 
-  // The fetch port is read-only and 16-bit, so the same model serves it: `we`
-  // is always zero and the code point rides the low half of the response.
+  // The fetch port is read-only, so the same model serves it: `we` is always
+  // zero. Responses are whole words on both ports now -- the core picks the
+  // code point out of one (k2g_membus.sv).
   k2g_mem_slow u_islow (
       .clk        (clk),
       .rst_n      (rst_n),
@@ -109,7 +110,7 @@ module tb_cosim
       .b_en       (imem_en),
       .b_we       (),
       .b_wdata    (),
-      .b_rdata    ({16'd0, imem_data})
+      .b_rdata    (imem_data)
   );
 
   k2g_mem_slow u_slow (

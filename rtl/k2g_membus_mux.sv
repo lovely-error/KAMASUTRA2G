@@ -16,6 +16,13 @@
 // A general version would count outstanding requests per master and hold the
 // switch until the count reaches zero. That is worth writing when something
 // actually needs to hand the bus over mid-run; nothing here does.
+//
+// SAME RULE COVERS BURSTS. A write burst occupies the request channel for
+// `len+1` beats (k2g_membus.sv), so `sel` moving inside one would split it
+// between two masters. It cannot happen here -- the copier only ever sends
+// single beats, and it has finished before `sel` moves -- but a master that
+// bursts through this mux would need the switch held, exactly as an arbiter
+// does. `k2g_psram`'s own arbiter is where that is implemented.
 
 module k2g_membus_mux (
     input logic sel,            // 0 = up_a owns the bus, 1 = up_b

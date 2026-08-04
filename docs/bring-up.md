@@ -391,8 +391,8 @@ LED:
 
 | | before PSRAM | with PSRAM |
 |---|---|---|
-| Logic | 4412 / 8640 (51%) | **6133 / 8640 (71%)** |
-| Registers | 1155 / 6771 (17%) | **2052 / 6771 (31%)** |
+| Logic | 4412 / 8640 (51%) | **6526 / 8640 (76%)** |
+| Registers | 1155 / 6771 (17%) | **1964 / 6771 (29%)** |
 | BSRAM | 7 / 26 (4 `k2g_mem` + 3 regfile) | **7 / 26** (4 IP + 3 regfile) |
 | Bitstream | 3.5 MB | 3.5 MB |
 
@@ -438,7 +438,7 @@ runs on a divided clock. It is now a divide-by-**2** at **13.5 MHz**.
 |---|---|---|---|
 | v1, single-cycle execute | 6.75 MHz | 10.0 MHz | 28 |
 | after Phase 2b, decode split out | **13.5 MHz** | **16.3 MHz** | **13** |
-| after Phase 3, memory is PSRAM | **13.5 MHz** | **15.56 MHz** | 26 |
+| after Phase 3, memory is PSRAM | **13.5 MHz** | **17.99 MHz** | 22 |
 
 **Observed running on hardware** at 13.5 MHz after a rebuild and reflash, from
 the Phase 2b build.
@@ -449,15 +449,21 @@ Phase 3 added the memory domain. The design's own clocks all meet:
 
 | Clock | Constraint | Actual Fmax | Logic levels |
 |---|---|---|---|
-| `clk_27m` | 27.000 MHz | 104.8 MHz | 5 |
-| `clk_sys` | 13.500 MHz | 15.56 MHz | 26 |
-| `clk_out` (PSRAM user side) | 67.500 MHz | 68.63 MHz | 8 |
+| `clk_27m` | 27.000 MHz | 120.7 MHz | 5 |
+| `clk_sys` | 13.500 MHz | 17.99 MHz | 22 |
+| `clk_out` (PSRAM user side) | 67.500 MHz | 67.98 MHz | 7 |
 
-`clk_out` has 1.7% margin, which is thin. It is the number to watch if Phase 4
-puts cache logic in that domain — the plan keeps the caches in `clk_sys`
-partly for this reason.
+`clk_out` has **0.7% margin**, which is not a margin. Its worst path starts
+inside the controller's temperature auto-adjust logic and comes out through
+`rd_data` into the adapter's line buffer, so almost all of it belongs to the
+IP. Registering that boundary to remove the adapter's share was tried twice and
+made the number worse both times — 66.05 MHz and forty more failing endpoints —
+because synthesis retimes the stage back out unless forced, and gains nothing
+when it is forced. The lever that would work is a lower memory clock, which
+costs nothing measurable; see the note above on the memory clock being a
+generation parameter.
 
-**Nine setup and seventeen hold endpoints do not close, and all of them are
+**Nine setup and eighteen hold endpoints do not close, and all of them are
 inside the IP** — the DLL's step signals and the SERDES `CALIB` pins, on paths
 between the controller's own 135 MHz and its 67.5 MHz user clock. None touch
 the core, the adapter or the CDC FIFOs. The `psram` stage, which passes on

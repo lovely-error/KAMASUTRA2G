@@ -27,42 +27,58 @@
 // which is a real constraint on the Phase 3 design and is written here rather
 // than discovered there.
 //
-// ---- the fetch port is 16 bits wide ----
+// ---- every response is a 32-bit word ----
 //
-// `rsp_data` is 32 bits, but a response to the INSTRUCTION port carries a code
-// point in bits [15:0] and nothing above them. That is not a property of this
-// interface -- it is a property of the fetch port, and it has always been true:
-// `k2g_mem` port A is a halfword port and selects by address bit 1, and
-// `k2g_core` reads `ibus.rsp_data[15:0]` directly.
+// Both ports get words. The fetch port used to get a code point in
+// `rsp_data[15:0]` and nothing above it, because `k2g_mem` port A was a
+// halfword port that selected by address bit 1 -- so whatever answered fetch
+// had to keep doing that, and `k2g_psram` was carrying the request's bit 1
+// across a clock domain for no other reason.
 //
-// Written down here because it stopped being free. While the only slave was a
-// thin bridge over `k2g_mem` the select came for nothing; `k2g_psram` has to
-// carry the request's bit 1 across a clock domain to do the same job, and the
-// Phase 4 I-cache will have to do it too. The alternative -- respond with
-// the word and let the core's fetch unit select, which already keeps
-// `issue_addr` beside every outstanding request -- is tidier and is worth
-// taking when Phase 4 touches both ends anyway.
+// The select now lives in the core's fetch unit, which already keeps
+// `issue_addr` beside every outstanding request and so has the bit for free.
+// That makes the two ports identical, which is what lets an instruction cache
+// be an ordinary master here: a refill wants words, not halfwords.
 //
-// ---- a beat is not a transaction ----
+// ---- a burst is one transaction ----
 //
-// This bus deliberately carries ONE BEAT per request. It has no burst length,
-// and a multi-beat transfer is a run of separate requests.
+// `len` is beats minus one. A single-word access is `len == 0`; a 128-byte
+// cache line is `len == 31`, and that is exactly one PSRAM command.
 //
-// That matters because a cache line fill is 64 bytes -- one PSRAM command
-// which then streams its beats -- and as far as this bus is concerned that
-// arrives as sixteen ordinary requests with nothing marking them as one
-// thing. Nothing here enforces their atomicity.
+// THIS REPLACED A BUS LOCK, and the reversal is worth recording because the
+// original reasoning was sound when it was written. This bus used to carry one
+// beat per request with no length at all, and a line fill was a run of
+// separate requests held together by a "burst in progress" lock -- a length
+// field was weighed and rejected because it "puts beat-counting into every
+// slave including the trivial BSRAM one".
 //
-// So the master issuing them must hold the bus for the whole run: a refill
-// takes a "burst in progress" lock and no other master may interleave a
-// request into the middle of it. A line half-filled from one address and half
-// from another is not detectable after the fact -- it just answers wrong
-// forever, from a tag that says it is valid.
+// Two things then happened. The trivial BSRAM slave was deleted, so the only
+// slave left is `k2g_psram`, which already counts sixteen beats internally.
+// And that slave turned out to cost 6.6 core cycles per request -- every
+// request becomes its own PSRAM command with a 32-cycle minimum interval --
+// so a 32-request line fill would have cost about 211 cycles against the 7 of
+// the single burst the line was sized to match. The rejected option became
+// free at the same time the accepted one became thirty times too slow.
 //
-// The alternative was a length field, making a burst one transaction. It was
-// weighed and not taken: it puts beat-counting into every slave including the
-// trivial BSRAM one, where a lock puts it only in the two masters that
-// actually burst.
+// The lock is gone rather than replaced: a burst is one transaction again, so
+// its atomicity is a property of the request instead of a convention. A slave
+// knows how many beats to expect and can check, where before a miscount was
+// undetectable -- a line half-filled from two addresses answers wrong forever,
+// from a tag that says it is valid.
+//
+// Rules:
+//
+//   * a burst must not cross a 128-byte boundary. One request, one PSRAM
+//     command; the slave asserts on this rather than silently wrapping.
+//   * a READ burst is one request and `len+1` responses, in order, for
+//     `addr`, `addr+4`, ... The master's credit must cover all of them.
+//   * a WRITE burst occupies the request channel for `len+1` accepted beats.
+//     The first carries `addr`, `we`, `len` and the first word; the rest carry
+//     only `wdata` and the other fields are ignored. An arbiter must hold the
+//     grant for the whole run -- which is what the lock used to be for, except
+//     that now the length says how long the run is.
+//   * `we` applies to every beat of a write burst. A line writeback opens all
+//     four lanes; there is no per-beat mask.
 
 interface k2g_membus;
 

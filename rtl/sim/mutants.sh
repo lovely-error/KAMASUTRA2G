@@ -214,40 +214,72 @@ run
 --
 psram-write-beat-select
 k2g_psram.sv
-    if ((state == S_WRITE) && (beat == {1'b0, p_beat})) begin
-    if ((state == S_WRITE) && (beat == 5'd0)) begin
+  wire logic [4:0] mask_lo = {beat[3:0], 1'b0};
+  wire logic [4:0] mask_lo = 5'd0;
 detect
 tb_psram_adapter
 run
 --
-psram-write-half-select
+psram-write-odd-words-masked-off
 k2g_psram.sv
-      if (p_high) data_mask = {~p_we, 4'hF};
-      if (!p_high) data_mask = {~p_we, 4'hF};
+    data_mask[7:4] = in_win_hi ? ~p_we : 4'hF;
+    data_mask[7:4] = 4'hF;
 detect
 tb_psram_adapter
 run
 --
-psram-write-data-not-held
+psram-write-data-not-walked
 k2g_psram.sv
-  assign wr_data = {p_wdata, p_wdata};
-  assign wr_data = {p_wdata + {27'd0, beat}, p_wdata + {27'd0, beat}};
+  wire logic [3:0] lb_ridx = (state == S_DRAIN) ? fill[4:1] : beat[3:0];
+  wire logic [3:0] lb_ridx = (state == S_DRAIN) ? fill[4:1] : 4'd0;
 detect
 tb_psram_adapter
 run
 --
 psram-read-half-select
 k2g_psram.sv
-  wire logic [31:0] beat_word = p_high ? rd_data[63:32] : rd_data[31:0];
-  wire logic [31:0] beat_word = rd_data[31:0];
+          lbuf_hi[beat[3:0]] <= rd_data[63:32];
+          lbuf_hi[beat[3:0]] <= rd_data[31:0];
 detect
 tb_psram_adapter
 run
 --
-psram-fetch-halfword-select
+fetch-halfword-select
+k2g_core.sv
+  wire logic [15:0] ans_cp   = ans_addr[1] ? ibus.rsp_data[31:16]
+  wire logic [15:0] ans_cp   = ans_addr[1] ? ibus.rsp_data[15:0]
+detect
+-
+cosim0
+--
+psram-burst-read-window
 k2g_psram.sv
-  wire logic [15:0] beat_half = p_haddr[0] ? beat_word[31:16] : beat_word[15:0];
-  wire logic [15:0] beat_half = beat_word[15:0];
+            left  <= p_len + 5'd1;
+            left  <= 5'd1;
+detect
+tb_psram_adapter
+run
+--
+psram-burst-write-window
+k2g_psram.sv
+                         (mask_lo >= p_off) && ((mask_lo - p_off) <= p_len);
+                         (mask_lo >= p_off) && ((mask_lo - p_off) <= 5'd0);
+detect
+tb_psram_adapter
+run
+--
+psram-burst-arbiter-not-held
+k2g_psram.sv
+  wire logic pick_d = wb_active ?  wb_src : rr_d;
+  wire logic pick_d = rr_d;
+detect
+tb_psram_adapter
+run
+--
+psram-drain-ignores-full
+k2g_psram.sv
+  wire logic drain_go = (state == S_DRAIN) && !rspf_wfull;
+  wire logic drain_go = (state == S_DRAIN);
 detect
 tb_psram_adapter
 run
@@ -262,16 +294,16 @@ run
 --
 psram-command-interval-ignored
 k2g_psram.sv
-          gap     <= TCMD;
-          gap     <= 6'd0;
+  localparam logic [5:0] TCMD = 6'd32;
+  localparam logic [5:0] TCMD = 6'd2;
 detect
 tb_psram_adapter
 run
 --
 psram-command-before-calibration
 k2g_psram.sv
-                      && init_calib      // NOT cmd_rdy alone: that is high
-                      && 1'b1            // NOT cmd_rdy alone: that is high
+                      && init_calib
+                      && 1'b1
 detect
 tb_psram_adapter
 run

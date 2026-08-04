@@ -195,6 +195,10 @@ module k2g_soc
   assign cbus.req.addr  = {16'd0, boot_ix};
   assign cbus.req.we    = 4'b0001 << boot_ix[1:0];
   assign cbus.req.wdata = {4{boot_data}};
+  // One byte at a time, so one beat. Bursting the copy would be four times
+  // faster and is not worth the adder: the whole thing is about 100 us either
+  // way, and it happens once.
+  assign cbus.req.len   = 5'd0;
 
   always_ff @(posedge clk_sys) begin
     if (!sys_rst_n) begin

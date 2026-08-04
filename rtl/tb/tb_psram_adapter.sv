@@ -26,7 +26,8 @@
 //     to be off by four lanes;
 //   * responses go to the bus that asked, in order, with two masters
 //     interleaving through one in-order sequencer;
-//   * the fetch port gets a 16-bit code point selected by address bit 1;
+//   * a burst is one PSRAM command: 32 words in and 32 words out, in order,
+//     which is the whole reason the bus grew a length field;
 //   * requests made before calibration are queued and answered rather than
 //     lost -- which on a real board is every request, for the first few
 //     hundred microseconds.
@@ -150,6 +151,7 @@ module tb_psram_adapter
     logic [31:0] v;
     int          i;
     r.addr  = a;
+    r.len   = 5'd0;
     r.we    = we;
     r.wdata = d;
     dq.push_back(r);
@@ -162,21 +164,63 @@ module tb_psram_adapter
   task automatic q_read_d(input logic [31:0] a);
     mem_req_t r;
     r.addr  = a;
+    r.len   = 5'd0;
     r.we    = 4'b0000;
     r.wdata = 32'd0;
     dq.push_back(r);
     dexp.push_back(sh_word(a[22:2]));
   endtask
 
-  task automatic q_read_i(input logic [31:0] a);
-    mem_req_t    r;
-    logic [31:0] w;
+  // ---- bursts -------------------------------------------------------------
+  // A read burst is one request and N responses, in order. A write burst is N
+  // accepted request beats: the first carries the address, the enables and the
+  // length, the rest carry only `wdata` (k2g_membus.sv).
+  task automatic q_read_burst_d(input logic [31:0] a, input int n);
+    mem_req_t r;
+    int       i;
     r.addr  = a;
+    r.len   = 5'(n - 1);
+    r.we    = 4'b0000;
+    r.wdata = 32'd0;
+    dq.push_back(r);
+    for (i = 0; i < n; i++) dexp.push_back(sh_word(a[22:2] + 21'(i)));
+  endtask
+
+  task automatic q_read_burst_i(input logic [31:0] a, input int n);
+    mem_req_t r;
+    int       i;
+    r.addr  = a;
+    r.len   = 5'(n - 1);
     r.we    = 4'b0000;
     r.wdata = 32'd0;
     iq.push_back(r);
-    w = sh_word(a[22:2]);
-    iexp.push_back(a[1] ? {16'd0, w[31:16]} : {16'd0, w[15:0]});
+    for (i = 0; i < n; i++) iexp.push_back(sh_word(a[22:2] + 21'(i)));
+  endtask
+
+  task automatic q_write_burst_d(input logic [31:0] a, input int n,
+                                 input logic [31:0] base_val);
+    mem_req_t r;
+    int       i;
+    for (i = 0; i < n; i++) begin
+      r.addr  = a;                    // ignored after the first beat
+      r.len   = 5'(n - 1);
+      r.we    = 4'b1111;
+      r.wdata = base_val + 32'(i);
+      dq.push_back(r);
+      shadow[a[22:2] + 21'(i)] = base_val + 32'(i);
+    end
+  endtask
+
+  // The fetch port gets whole words like everything else now; the core picks
+  // the code point out of one (k2g_membus.sv).
+  task automatic q_read_i(input logic [31:0] a);
+    mem_req_t r;
+    r.addr  = a;
+    r.len   = 5'd0;
+    r.we    = 4'b0000;
+    r.wdata = 32'd0;
+    iq.push_back(r);
+    iexp.push_back(sh_word(a[22:2]));
   endtask
 
   // ---- drivers ------------------------------------------------------------
@@ -260,6 +304,9 @@ module tb_psram_adapter
   localparam logic [31:0] FETCH_R = 32'h0000_4000;   // read by ibus only
   localparam logic [31:0] DATA_R  = 32'h0010_0000;   // written by dbus only
   localparam logic [31:0] TOP_W   = 32'h007F_FFFC;   // last word of the 8 MB
+  localparam logic [31:0] LINE_W  = 32'h0020_0000;   // written as one burst
+  localparam logic [31:0] LINE_P  = 32'h0030_0000;   // a partial burst
+  localparam logic [31:0] LINE_X  = 32'h0040_0000;   // burst against fetch
 
   int i;
 
@@ -327,16 +374,54 @@ module tb_psram_adapter
     q_read_d(BURST_A + 32'd36);
     drain("halfword readback");
 
-    // ---- the fetch port is 16 bits ----
-    q_write(FETCH_R,        4'b1111, 32'hBEEF_CAFE);
+    // ---- the fetch port answers with words like every other master ----
+    q_write(FETCH_R,         4'b1111, 32'hBEEF_CAFE);
     q_write(FETCH_R + 32'd4, 4'b1111, 32'h0BAD_F00D);
     drain("fetch setup");
 
-    q_read_i(FETCH_R);            // expects 0000_CAFE
-    q_read_i(FETCH_R + 32'd2);    // expects 0000_BEEF
-    q_read_i(FETCH_R + 32'd4);    // expects 0000_F00D
-    q_read_i(FETCH_R + 32'd6);    // expects 0000_0BAD
+    q_read_i(FETCH_R);
+    q_read_i(FETCH_R + 32'd4);
     drain("fetch readback");
+
+    // ---- a whole line, read as one burst ----
+    // BURST_A already holds 32 known words from the fill above, one per word
+    // of a single 128-byte burst. Reading them back as one request is the
+    // direct test of the length field: 32 responses, in address order, from
+    // one PSRAM command.
+    q_read_burst_d(BURST_A, 32);
+    drain("burst read, whole line");
+
+    // And on the fetch port, which is what an instruction cache refill is.
+    q_read_burst_i(BURST_A, 32);
+    drain("burst read, fetch port");
+
+    // ---- a whole line, written as one burst ----
+    q_write_burst_d(LINE_W, 32, 32'h7000_0000);
+    drain("burst write");
+    q_read_burst_d(LINE_W, 32);
+    drain("burst write readback");
+
+    // Word by word as well, so a burst that wrote the right words in the wrong
+    // order cannot be hidden by a burst read making the same mistake twice.
+    for (i = 0; i < 32; i++) q_read_d(LINE_W + 32'(4 * i));
+    drain("burst write readback, singly");
+
+    // ---- a partial burst, not starting at the line boundary ----
+    // Offsets 5..12 of a line: the window is neither aligned nor a whole line,
+    // so the beat the burst starts in is half masked and so is the one it ends
+    // in. Words outside the window must be untouched, which is what the
+    // neighbours below check.
+    q_write(LINE_P + 32'd16, 4'b1111, 32'hAAAA_0004);   // word 4, just before
+    q_write(LINE_P + 32'd52, 4'b1111, 32'hAAAA_000D);   // word 13, just after
+    drain("partial burst neighbours");
+
+    q_write_burst_d(LINE_P + 32'd20, 8, 32'h9000_0000);
+    drain("partial burst write");
+
+    q_read_burst_d(LINE_P + 32'd20, 8);
+    q_read_d(LINE_P + 32'd16);
+    q_read_d(LINE_P + 32'd52);
+    drain("partial burst readback");
 
     // ---- both masters at once ----
     // Disjoint regions, both queues loaded before either drains, so the
@@ -351,6 +436,18 @@ module tb_psram_adapter
       q_read_d(DATA_R + 32'(4 * i));
     end
     drain("interleaved");
+
+    // ---- a write burst while the other master is asking ----
+    // The later beats of a write burst carry only `wdata`, so an arbiter that
+    // let a fetch in between them would take a read's address as a data word
+    // and put it in the line. Both queues are loaded before either drains, so
+    // the arbiter has something to choose between throughout.
+    q_write_burst_d(LINE_X, 32, 32'h6000_0000);
+    for (i = 0; i < 8; i++) q_read_i(BURST_A + 32'(4 * i));
+    drain("burst write against fetch");
+
+    q_read_burst_d(LINE_X, 32);
+    drain("interleaved burst readback");
 
     // ---- the top of the address space ----
     q_write(TOP_W, 4'b1111, 32'h5A5A_F00F);
