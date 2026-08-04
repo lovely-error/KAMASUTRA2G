@@ -1,0 +1,20 @@
+; f32_csp.kasm -- a faulting I/O write must not reach the device.
+;
+; The read-port check has to happen before the request leaves the core, and a
+; CSP write is where that is easiest to see: by the time the fault is known,
+; the byte is already out of the UART and cannot be recalled. Memory has the
+; same problem (f32_store) but a store is invisible to the cosimulation, which
+; compares registers, tags, flags and the fault registers -- not memory. UART
+; traffic it does compare, so this is the one program that can prove the
+; request gating rather than just the fault.
+;
+; The port number is the operand carrying the reserved tag, so the fault comes
+; from port A while the data register is ordinary.
+
+        .org    0
+
+        puc32   r1, 0x00        ; UART_DATA
+        puc32   r2, 0x41        ; 'A', which must never be transmitted
+        rdt     r1, f32
+        out     r1, r2          ; FP_UNIMPLEMENTED, and silence
+        halt

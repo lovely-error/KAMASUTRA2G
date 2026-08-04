@@ -124,6 +124,70 @@ detect
 -
 cosim0
 --
+core-f32-operand-not-checked
+k2g_core.sv
+  wire logic f32_a    = reads_a && (xa_tag == RDT_F32);
+  wire logic f32_a    = 1'b0;
+detect
+f32_operand
+cosim1
+--
+core-f32-predicate-not-checked
+k2g_core.sv
+  wire logic f32_cond = (uop.cond != CCK_NONE) && (xc_tag == RDT_F32);
+  wire logic f32_cond = 1'b0;
+detect
+f32_predicate
+cosim1
+--
+core-f32-csp-write-escapes
+k2g_core.sv
+  wire logic csp_req      = uop_valid && cond_met && !halted_r && !f32_any &&
+  wire logic csp_req      = uop_valid && cond_met && !halted_r &&
+detect
+f32_csp
+cosim1
+--
+core-misaligned-not-detected
+k2g_core.sv
+      end else if ((is_load || is_store) && misaligned) begin
+      end else if (1'b0) begin
+detect
+fault_access
+cosim1
+--
+core-out-of-range-not-detected
+k2g_core.sv
+      end else if ((is_load || is_store) && out_of_range) begin
+      end else if (1'b0) begin
+detect
+fault_range
+cosim1
+--
+core-bad-port-not-detected
+k2g_core.sv
+      end else if (csp_bad_port) begin
+      end else if (1'b0) begin
+detect
+fault_port
+cosim1
+--
+core-odd-jump-target-accepted
+k2g_core.sv
+      end else if ((uop.kind == UOP_PREP_JUMP) && jump_target[0]) begin
+      end else if (1'b0) begin
+detect
+fault_fetch
+cosim1
+--
+decode-fault-info-dropped
+k2g_core.sv
+        detect_info  = uop.imm;
+        detect_info  = 32'd0;
+detect
+fault_prefix
+cosim1
+--
 cdc-binary-not-gray-pointer
 k2g_cdc_fifo.sv
   assign wgray_next = to_gray(wbin_next);
@@ -243,8 +307,36 @@ apply_mutation() {
 
 # Fresh copy of just the sources; the out/ trees under board/ and sv-probe/
 # hold bitstreams and are large.
+# Questa's `vsim` spawns `vish` and `vsimk`, and they outlive it by a moment.
+# On Windows an open handle makes the directory they ran in unremovable, so the
+# `rm -rf` below fails while they linger -- and it used to fail QUIETLY, leaving
+# the next mutant to run against the previous one's compiled library. Waiting
+# for them costs a second and is the difference between that and a clean tree.
+wait_for_questa_exit() {
+    local i
+    for i in $(seq 1 40); do
+        ps -W 2>/dev/null | grep -qiE 'vsim|vish|vsimk' || return 0
+        sleep 0.25
+    done
+    return 1
+}
+
 reset_scratch() {
-    rm -rf "$SCRATCH"
+    wait_for_questa_exit || true
+    local i
+    for i in 1 2 3 4 5; do
+        rm -rf "$SCRATCH" 2>/dev/null
+        [ -e "$SCRATCH" ] || break
+        sleep 1
+    done
+    # Fatal rather than a warning. A scratch tree that did not clear means the
+    # mutation after this one is applied on top of whatever is left, and every
+    # verdict from there on is about a design nobody wrote.
+    if [ -e "$SCRATCH" ]; then
+        echo "cannot clear $SCRATCH -- a simulator still holds it" >&2
+        echo "run 'bash rtl/sim/mutants.sh' again once it has exited" >&2
+        exit 1
+    fi
     mkdir -p "$SCRATCH/rtl/sim"
     cp "$RTL"/*.sv "$RTL"/*.svh "$SCRATCH/rtl/" 2>/dev/null
     cp -r "$RTL/tb" "$SCRATCH/rtl/tb"
@@ -262,6 +354,10 @@ run_case() {
         cosim0)  K2G_RTL="$SCRATCH/rtl" LATENCY=0  bash "$HERE/cosim.sh" 1 > "$log" 2>&1 ;;
         cosim40) K2G_RTL="$SCRATCH/rtl" LATENCY=40 bash "$HERE/cosim.sh" 1 > "$log" 2>&1 ;;
         icosim)  K2G_RTL="$SCRATCH/rtl" ILATENCY=25 bash "$HERE/cosim.sh" 1 > "$log" 2>&1 ;;
+        # One program rather than the whole sweep: the fault guards each have a
+        # program written for them, and a full cosim run is 90 seconds against
+        # this one's 11. `tb` names the program.
+        cosim1)  K2G_RTL="$SCRATCH/rtl" PROGRAMS="$tb" bash "$HERE/cosim.sh" 0 > "$log" 2>&1 ;;
     esac
 }
 
@@ -283,6 +379,16 @@ process_one() {
 
     run_case "$runner" "$tb" "$log"
     rc=$?
+
+    # A run that produced no log did not happen -- the work directory was
+    # unusable, or the runner never started. Its exit status still looks like a
+    # verdict: non-zero reads as `caught` for a `detect` entry, which is a false
+    # PASS in the one script whose whole purpose is to disbelieve passes.
+    if [ ! -s "$log" ]; then
+        printf '%-46s %-8s %s\n' "$name" "$expect" "ERROR (no log; the test never ran)"
+        bad=$((bad + 1))
+        return
+    fi
 
     if grep -q "COMPILE FAILED" "$log"; then
         printf '%-46s %-8s %s\n' "$name" "$expect" "ERROR (mutant does not compile)"

@@ -16,7 +16,9 @@
 # agreement between the two machines is not the same as either being right.
 #
 # A failing seed is reproducible:
-#   cd emu && cargo run --release --bin kgen -- --seed N --count 250 -o r.bin
+        ( cd "$ROOT/emu" && cargo run --release --quiet --bin kgen -- \
+            --seed "$((k + 1))" --count "$COUNT" --fault "$k" \
+            -o "$WORK/randf_$k.bin" ) > /dev/null 2>&1
 
 set -u
 
@@ -55,6 +57,12 @@ LATENCY="${LATENCY:-0}"
 # a mis-fetched stream on one side, the pending-load path on the other. A
 # single knob would let one hide the other's bugs.
 ILATENCY="${ILATENCY:-0}"
+
+# A space-separated subset of the shipped programs, for when a run is aimed at
+# one thing: rtl/sim/mutants.sh breaks a single guard and wants the one program
+# that guard protects, not a 90-second sweep of everything. Empty runs the
+# whole set, which is what a phase gate wants.
+PROGRAMS="${PROGRAMS:-}"
 
 [ -x "$QUESTA/vsim.exe" ] || { echo "questa not found at $QUESTA" >&2; exit 1; }
 
@@ -112,6 +120,10 @@ run_one() {
 
 fail=0
 total_checks=0
+# The totals below add up every cosim_*.log in the work directory, so last
+# run's logs have to go first -- otherwise a filtered run reports the whole
+# suite's comparison count for the one program it actually ran.
+rm -f "$WORK"/cosim_*.log
 
 if [ -n "$ONE_IMAGE" ]; then
     run_one "$ONE_IMAGE" "$(basename "$ONE_IMAGE" .bin)" || fail=1
@@ -136,11 +148,12 @@ else
     # cosimulation is the only thing that ever looks at them. fault_condcode
     # is for the cause, which used to be ILLEGAL_OPCODE here and
     # ILLEGAL_PREFIX_COMBO in the RTL.
-    for prog in hello fib hazard \
-                f32_operand f32_store f32_predicate f32_escape \
-                fault_access fault_store fault_range fault_port fault_fetch \
-                fault_squashed fault_unpredicated \
-                fault_prefix fault_opcode fault_condcode; do
+    all_programs="hello fib hazard
+                  f32_operand f32_store f32_predicate f32_escape f32_csp
+                  fault_access fault_store fault_range fault_port fault_fetch
+                  fault_squashed fault_unpredicated
+                  fault_prefix fault_opcode fault_condcode"
+    for prog in ${PROGRAMS:-$all_programs}; do
         src="$ROOT/emu/programs/$prog.kasm"
         [ -f "$src" ] || continue
         ( cd "$ROOT/emu" && cargo run --release --quiet --bin kasm -- \
@@ -155,8 +168,12 @@ else
     # program left them -- which is the part a hand-written program cannot
     # arrange. The expected cause comes from kgen rather than a table here.
     for k in $(seq 0 9); do
-        ( cd "$ROOT/emu" && cargo run --release --quiet --bin kgen --             --seed "$((k + 1))" --count "$COUNT" --fault "$k"             -o "$WORK/randf_$k.bin" ) > /dev/null 2>&1
-        want=$( cd "$ROOT/emu" && cargo run --release --quiet --bin kgen --             --fault-cause "$k" )
+        [ -n "$PROGRAMS" ] && break
+        ( cd "$ROOT/emu" && cargo run --release --quiet --bin kgen -- \
+            --seed "$((k + 1))" --count "$COUNT" --fault "$k" \
+            -o "$WORK/randf_$k.bin" ) > /dev/null 2>&1
+        want=$( cd "$ROOT/emu" && cargo run --release --quiet --bin kgen -- \
+            --fault-cause "$k" )
         run_one "$WORK/randf_$k.bin" "random-fault[$k]" "$want" || fail=1
     done
 

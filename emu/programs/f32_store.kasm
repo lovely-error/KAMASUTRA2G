@@ -2,9 +2,15 @@
 ;
 ; The read-port check has to happen before the request leaves the core, not
 ; merely before the writeback. A fault suppresses the register write on its own
-; -- writeback is gated on it -- but a store is already on the bus by then, and
-; a CSP write is already out of the UART. Precision is the whole point of a
-; machine-check halt (spec 8): the offending instruction commits nothing.
+; -- writeback is gated on it -- but a store is already on the bus by then.
+; Precision is the whole point of a machine-check halt (spec 8): the offending
+; instruction commits nothing.
+;
+; THIS PROGRAM PROVES THE FAULT, NOT THE SUPPRESSED STORE. The cosimulation
+; compares registers, tags, flags and the fault registers -- not memory -- so a
+; core that faults AND stores passes it: removing `!f32_any` from `mem_access`
+; leaves this green. `f32_csp.kasm` is the one that can tell, because a byte
+; handed to the UART is traffic the comparison does see.
 ;
 ; A store also reads *both* ports, address and data, which is what makes it the
 ; useful case: its width comes from the source register's tag (spec 5.3), so an

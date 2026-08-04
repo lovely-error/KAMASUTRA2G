@@ -85,6 +85,7 @@ const PROGRAM_OUTCOMES: &[(&str, Option<FaultCause>)] = &[
 	("f32_store.kasm", Some(FaultCause::FpUnimplemented)),
 	("f32_predicate.kasm", Some(FaultCause::FpUnimplemented)),
 	("f32_escape.kasm", None),
+	("f32_csp.kasm", Some(FaultCause::FpUnimplemented)),
 	// The access faults, which depend on a register value.
 	("fault_access.kasm", Some(FaultCause::MisalignedLoad)),
 	("fault_store.kasm", Some(FaultCause::MisalignedStore)),
