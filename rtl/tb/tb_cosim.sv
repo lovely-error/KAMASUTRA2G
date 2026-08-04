@@ -98,6 +98,23 @@ module tb_cosim
 
   k2g_core #(.MEM_BYTES(MEM_BYTES)) dut (.*);
 
+  // THE INSTRUCTION CACHE IS IN THE PATH HERE, not bypassed. A cache is
+  // supposed to be architecturally invisible, and this is the only test that
+  // can say so: every register, tag and flag is compared after every
+  // instruction, so a cache that ever answered with a stale line would show up
+  // as a decoded instruction that does not match the emulator's.
+  //
+  // It is also where `k2g_mem_slow`'s burst support is first exercised --
+  // nothing else sends `len != 0` at all.
+  k2g_membus ibus_mem ();
+
+  k2g_icache u_icache (
+      .clk  (clk),
+      .rst_n(rst_n),
+      .up   (ibus),
+      .down (ibus_mem)
+  );
+
   // The fetch port is read-only, so the same model serves it: `we` is always
   // zero. Responses are whole words on both ports now -- the core picks the
   // code point out of one (k2g_membus.sv).
@@ -105,7 +122,7 @@ module tb_cosim
       .clk        (clk),
       .rst_n      (rst_n),
       .max_latency(ilatency),
-      .bus        (ibus),
+      .bus        (ibus_mem),
       .b_addr     (imem_addr),
       .b_en       (imem_en),
       .b_we       (),
@@ -409,6 +426,24 @@ module tb_cosim
           break;
         end
       end
+    end
+
+    // THE LOOP CAN ALSO EXIT BECAUSE THE CORE STOPPED RETIRING, and until this
+    // check existed that was silent: the loop fell out, the emulator had not
+    // been stepped either -- it only steps on a retirement -- so both machines
+    // agreed about everything, the UART comparison found two empty streams,
+    // and the run passed. A deadlocked machine was indistinguishable from a
+    // correct one.
+    //
+    // Found by a mutant, not by reasoning: inverting the instruction cache's
+    // tag comparison makes every line miss forever, so the core never receives
+    // a code point. That reported MISSED, which is what a vacuous pass looks
+    // like from the outside.
+    checks++;
+    if (stuck >= STUCK_LIMIT) begin
+      $display("TB_FAIL: the core stopped retiring -- %0d cycles with no instruction, after %0d retired",
+               STUCK_LIMIT, retired);
+      errors++;
     end
 
     if (retired >= max_insns) begin

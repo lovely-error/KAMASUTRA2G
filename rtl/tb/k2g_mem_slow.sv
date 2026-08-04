@@ -205,16 +205,8 @@ module k2g_mem_slow #(
     end
   end
 
-  // Burst support is written but NOT YET EXERCISED: nothing sends `len != 0`
-  // until the instruction cache does. Left in rather than stubbed so that when
-  // the cache arrives a failure points at the cache, which is the whole reason
-  // for building things in this order -- but it is reasoning, not measurement,
-  // until then.
-  always_ff @(posedge clk) begin
-    if (rst_n && bus.req_valid && bus.req_ready && (bus.req.len != 5'd0) &&
-        (state == S_IDLE))
-      $display("k2g_mem_slow: first burst seen, len=%0d", bus.req.len + 1);
-  end
+  // Burst support is exercised: `tb_cosim` puts `k2g_icache` in the fetch path
+  // and every refill arrives here as one 32-word request.
 `endif
 
 endmodule

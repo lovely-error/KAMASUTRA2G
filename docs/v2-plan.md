@@ -575,6 +575,40 @@ points were. That is what Phase 4 is for.
 
 **Goal:** caches over the real 8 MB backing store, built once. (Was: before PSRAM's timing enters.
 
+**4b done — the instruction cache.** `rtl/k2g_icache.sv`: direct-mapped, 8 KB, 128-byte lines,
+read-only. Measured in `fibforever`'s delay loop, which touches no data memory so every cycle of it
+is fetch:
+
+| | before | with I$ |
+|---|---|---|
+| CPI in the loop | 19.80 | **3.0003** |
+| bus fetches in 20000 cycles | 3030 | **0** |
+| cycles per code point | 6.6 | **1.0** |
+| cost | — | **419 logic cells, 4 BSRAM** |
+
+1.0 cycle per code point is exactly what the BSRAM machine did. The loop is nine code points, fits
+in one line, and after the first miss the bus goes silent.
+
+Three choices that are not what the text below assumes:
+
+- **A miss is not accepted.** `req_ready` stays low and the core re-offers, because its `pc` does
+  not advance until a request is taken. That removes the held-request register, the answer-from-the-
+  refill-stream path and the state around them, for one extra pass through the request path per
+  miss — one or two cycles against forty.
+- **Nothing is accepted during a refill.** That is what stops a hit overtaking an earlier miss,
+  which on this bus means code points and addresses swapping.
+- **Tags are distributed RAM, not flip-flops.** 64 × 10 bits of flops is affordable, but reading
+  them by index is a 64-to-1 multiplexer ten bits wide, and LUTs are the binding constraint (76%
+  before the cache) while flops are at 30%. Valid bits stay flops: they are the one thing that has
+  to clear wholesale, for reset and later for `ICINVR`.
+
+**It found three holes, two of them in tests that were passing.** `tb_cosim` had no verdict for the
+path where its retire loop gives up — a core that stopped retiring left the emulator unstepped, so
+both machines agreed about nothing and the run passed; found by a mutant reporting MISSED. `tb_soc`
+compared the boot image against memory after the core had started running, which was latent at CPI
+20 and immediate at CPI 3. And `cosim.sh` silently skipped a program named by `PROGRAMS` that did
+not exist, which is how a mutant entry with a typo passed having run zero instructions.
+
 - **`rtl/k2g_icache.sv`**, **`rtl/k2g_dcache.sv`** — direct-mapped, 8 KB each, **128-byte** lines
   matching one PSRAM burst so a refill is exactly one burst. `Burst Mode = 64` is bytes per die
   and there are two dies; see `docs/bring-up.md`. D$ is
@@ -626,18 +660,19 @@ both machines. **That program does not exist yet** — `emu/programs/` has nothi
 it is the only test that proves the write-back D$ and the I$ agree, so it is part of the phase
 rather than a nice-to-have.
 
-**Where the logic budget stands before either cache is written: 6526 / 8640, 76%.** That leaves 2114
-cells for two caches, and the levers if it does not fit are, in order, cache size, tag width, then
-the register file's third read port. Synthesize the I-cache on its own before wiring it, the way
-`k2g_psram` was measured at 362.
+**Where the logic budget stands with the I-cache in: 6945 / 8640, 81%.** The I$ cost 419 cells, so
+1695 are left for the D$ -- which needs dirty bits and a victim writeback path the I$ does not, so
+it will be bigger. If it does not fit, the levers in order are cache size, tag width, then the
+register file's third read port. BSRAM is 11 of 26 with 4 more to come, which is comfortable.
 
 ---
 
 ## Risks
 
 - **Logic utilization is the binding constraint, not BSRAM.** v1 was at 55% of 8640 before a
-  pipeline, two caches, a CDC FIFO and the PSRAM IP; it is at **76%** with everything but the
-  caches. BSRAM is comfortable (19 of 26 free, 8 needed); LUTs are not. Synthesize each module as
+  pipeline, two caches, a CDC FIFO and the PSRAM IP; it is at **81%** with the instruction cache in
+  and the data cache still to come. BSRAM is comfortable (11 of 26 used, 4 more to come); LUTs are
+  not. Synthesize each module as
   it is written and record the number. If it overflows, the levers in order are cache size, tag
   width, then the register file's third read port.
 - **`clk_out` has 0.7% margin, and this module does not own the path.** 67.98 MHz against a 67.500

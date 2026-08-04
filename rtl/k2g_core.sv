@@ -139,7 +139,21 @@ module k2g_core
   // everything with it -- `k2g_mem_slow` still does. It stopped being true in
   // `k2g_soc` the moment memory became PSRAM: the boot copier needs the bus
   // live while the core is still held, so the memory side comes out of reset
-  // first, by the whole length of the copy. `tb_soc` measures it.
+  // first, by the whole length of the copy. Measured on the mutant at the
+  // time: 167 requests issued during reset, two still in flight at release,
+  // and every answer after that paired with the wrong `issue_addr` entry.
+  //
+  // NO MUTANT IS CARRIED FOR IT ANY MORE, and the reason is worth knowing
+  // rather than rediscovering. `k2g_icache` now sits between this port and the
+  // bus, is reset with the core, and does not accept a miss -- so a core in
+  // reset asking an empty cache is refused every time and the consequence is
+  // masked. The mutant reported MISSED, which is what a test that cannot fail
+  // looks like.
+  //
+  // The guard stays because it is a property of THIS module, not of what
+  // happens to be behind it: the masking depends entirely on the cache being
+  // held by `cpu_rst_n` rather than by the system reset. Change that and this
+  // line is the only thing left protecting the issue-address queue.
   //
   // The data port needs no such guard -- `mem_access` requires `uop_valid`,
   // which comes from the D->X register and is reset with everything else.

@@ -160,7 +160,16 @@ else
                   fault_prefix fault_opcode fault_condcode"
     for prog in ${PROGRAMS:-$all_programs}; do
         src="$ROOT/emu/programs/$prog.kasm"
-        [ -f "$src" ] || continue
+        # Skipping is only right for the default list, which is allowed to name
+        # programs that have not been written yet. A program asked for BY NAME
+        # and not found means the run does nothing and exits 0 -- which is how
+        # a mutant entry with a typo in it reported MISSED, having never run a
+        # single instruction.
+        if [ ! -f "$src" ]; then
+            [ -z "$PROGRAMS" ] && continue
+            echo "no such program: emu/programs/$prog.kasm" >&2
+            exit 1
+        fi
         ( cd "$ROOT/emu" && cargo run --release --quiet --bin kasm -- \
             "programs/$prog.kasm" -o "$WORK/$prog.bin" ) > /dev/null 2>&1
         run_one "$WORK/$prog.bin" "$prog" || fail=1

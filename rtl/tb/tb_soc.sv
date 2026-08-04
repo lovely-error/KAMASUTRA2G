@@ -100,8 +100,20 @@ module tb_soc;
     if (dut.core_tx_valid && dut.tx_ready) uart_bytes++;
   end
 
-  // A CORE IN RESET MUST NOT ASK THE BUS FOR ANYTHING. Stated directly,
-  // because every indirect version of it measured here was blind:
+  // A CORE IN RESET MUST NOT ASK THE BUS FOR ANYTHING.
+  //
+  // CURRENTLY UNREACHABLE, and kept anyway. `k2g_icache` sits between the core
+  // and the bus now, is reset with the core, and refuses a miss -- so a core
+  // in reset asking an empty cache is refused every time and this counter
+  // cannot rise however the core behaves. The mutant that used to prove this
+  // check works has been removed rather than left reporting MISSED.
+  //
+  // It stays because the masking depends on the cache being held by
+  // `cpu_rst_n`; if that ever becomes the system reset, a cache holding valid
+  // lines would start accepting during reset and this is what would say so.
+  //
+  // Stated directly, because every indirect version of it measured here was
+  // blind:
   //
   //   * "answered more often than it asked" is false at the end of any run --
   //     the core legitimately has up to four requests in flight, which is
@@ -125,6 +137,26 @@ module tb_soc;
     if (dut.cpu_rst_n !== 1'b1 &&
         dut.ibus.req_valid === 1'b1 && dut.ibus.req_ready === 1'b1)
       reset_iss++;
+  end
+
+  // Bytes the PROGRAM has written, so the boot-image check below can skip
+  // them. The core is released the moment `booting` falls, while the last
+  // copier write is still crossing to PSRAM -- so there is an unavoidable
+  // window in which the program is running and the image is not yet all
+  // there, and `fibforever` spends it writing digits into the `buf` that is
+  // part of its own image.
+  //
+  // This was latent until the instruction cache landed. At 20 cycles per
+  // instruction the core could not reach its first store inside the settle
+  // window; at 3 it reaches it easily. The test was wrong before and passing.
+  bit core_wrote [int];
+
+  always @(posedge dut.clk_sys) begin
+    if (dut.cpu_rst_n === 1'b1 && dut.dbus.req_valid === 1'b1 &&
+        dut.dbus.req_ready === 1'b1 && dut.dbus.req.we != 4'b0000) begin
+      for (int b = 0; b < 4; b++)
+        if (dut.dbus.req.we[b]) core_wrote[int'(dut.dbus.req.addr) + b] = 1'b1;
+    end
   end
 
   int retired  = 0;
@@ -158,6 +190,7 @@ module tb_soc;
   logic [20:0] w;
   logic [31:0] got_word;
   logic [7:0]  got;
+  int  skipped;
 
   initial begin
     // The button is pulled up, so the machine's power-on reset is the debounce
@@ -204,7 +237,12 @@ module tb_soc;
     repeat (200) @(posedge dut.clk_sys);
 
     // ---- every byte of the program is in memory ----
+    skipped = 0;
     for (i = 0; i < ROM_BYTES; i++) begin
+      if (core_wrote.exists(i)) begin
+        skipped++;                         // the program got there first
+        continue;
+      end
       ref_addr = ROM_ADDR_BITS'(i);
       #1;                                  // combinational ROM
       w = 21'(i >> 2);
@@ -219,6 +257,17 @@ module tb_soc;
                          i, ref_data, got));
       end
     end
+
+    // Skipping is only legitimate for a handful of bytes at the end of the
+    // image. If the program has overwritten most of itself, something else is
+    // wrong and this check has stopped meaning anything.
+    checks++;
+    if (skipped > ROM_BYTES / 4)
+      fail($sformatf("the program overwrote %0d of %0d image bytes before they could be checked",
+                     skipped, ROM_BYTES));
+    if (skipped > 0)
+      $display("  %0d image byte(s) skipped: written by the program before the check",
+               skipped);
 
     // ---- and then it runs ----
     guard = 0;

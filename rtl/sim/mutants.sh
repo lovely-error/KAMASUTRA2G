@@ -308,13 +308,53 @@ detect
 tb_psram_adapter
 run
 --
-core-fetches-while-held-in-reset
-k2g_core.sv
-  assign ibus.req_valid = rst_n && !halted_r && (inflight < 3'(F2D_DEPTH));
-  assign ibus.req_valid = !halted_r && (inflight < 3'(F2D_DEPTH));
+icache-tag-not-checked
+k2g_icache.sv
+  wire logic hit = up.req_valid && valid[req_idx] && (tags[req_idx] == req_tag);
+  wire logic hit = up.req_valid && valid[req_idx];
 detect
-tb_soc
+tb_icache
 run
+--
+icache-valid-not-checked
+k2g_icache.sv
+  wire logic hit = up.req_valid && valid[req_idx] && (tags[req_idx] == req_tag);
+  wire logic hit = up.req_valid && (tags[req_idx] == req_tag);
+detect
+tb_icache
+run
+--
+icache-refill-stops-early
+k2g_icache.sv
+          if (fill_cnt == 5'(WPL - 1)) begin
+          if (fill_cnt == 5'd0) begin
+detect
+tb_icache
+run
+--
+icache-refill-all-one-word
+k2g_icache.sv
+  wire logic [31:0] fill_addr = fill_base | {25'd0, fill_cnt, 2'b00};
+  wire logic [31:0] fill_addr = fill_base;
+detect
+tb_icache
+run
+--
+icache-fetches-one-word-not-a-line
+k2g_icache.sv
+  assign down.req.len   = 5'(WPL - 1);
+  assign down.req.len   = 5'd0;
+detect
+tb_icache
+run
+--
+icache-serves-stale-lines
+k2g_icache.sv
+  wire logic hit = up.req_valid && valid[req_idx] && (tags[req_idx] == req_tag);
+  wire logic hit = up.req_valid && valid[req_idx] && (tags[req_idx] != req_tag);
+detect
+-
+cosim0
 --
 copier-ignores-backpressure
 board/k2g_soc.sv

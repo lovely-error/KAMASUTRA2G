@@ -301,10 +301,25 @@ module k2g_soc
   // machine waits for it -- it is for LED0.
   logic calib;
 
+  // ---- instruction cache --------------------------------------------------
+  // Held in reset with the CPU rather than with the system, which is what
+  // makes the boot copy safe: the copier writes the program through the data
+  // port while the cache is invalid, and the cache is released with the core
+  // that will first ask it for anything. A cache that came out of reset early
+  // could hold a line fetched from memory the copier had not written yet.
+  k2g_membus ibus_mem ();
+
+  k2g_icache u_icache (
+      .clk  (clk_sys),
+      .rst_n(cpu_rst_n),
+      .up   (ibus),
+      .down (ibus_mem)
+  );
+
   k2g_psram u_psram (
       .clk_sys      (clk_sys),
       .rst_n        (sys_rst_n),
-      .ibus         (ibus),
+      .ibus         (ibus_mem),
       .dbus         (mbus),
       .calib        (calib),
       .clk_out      (psram_clk_out),

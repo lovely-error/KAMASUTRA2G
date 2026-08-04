@@ -42,6 +42,7 @@ six cycles each at 6.75 MHz, giving one second. Neither number has held.
 | v1, BSRAM at 6.75 MHz | 6 | 1.00 s | as tuned |
 | after Phase 2, BSRAM at 13.5 MHz | **9** | 0.75 s | measured, `tb_core` |
 | after Phase 3, PSRAM at 13.5 MHz | **59.4** | **4.95 s** | measured, `tb_soc` |
+| after Phase 4b, with the I-cache | **9** | **0.75 s** | measured, `tb_soc` |
 
 The loop touches no data memory, so every one of those cycles is instruction
 fetch. Measured in the loop: **3 code points per instruction, and 6.6 `clk_sys`
@@ -49,12 +50,13 @@ cycles per bus access** against 1.0 over BSRAM. 6.6 cycles at 13.5 MHz is
 489 ns, which is the PSRAM command interval — 32 `clk_out` cycles at 67.5 MHz
 is 474 ns — plus the clock crossing.
 
-So the slowdown is not the core, the crossing or the adapter being wasteful. It
-is that **there is no instruction cache yet**: every code point is a separate
-128-byte burst of which 124 bytes are discarded, and the discarded part is
-where the next 63 code points were. Phase 4's I-cache line is exactly one
-burst, and this nine-code-point loop fits inside one line, so it should return
-to roughly the 0.75 s row.
+The slowdown was not the core, the crossing or the adapter being wasteful: it
+was that every code point was a separate 128-byte burst of which 124 bytes were
+discarded, and the discarded part was where the next 63 code points were.
+**The instruction cache closed it exactly as predicted** -- its line is one
+burst, this nine-code-point loop fits inside one line, and the loop is back to
+1.0 cycle per code point with zero bus traffic. The 0.75 s row is computed from
+that measured CPI and has not been timed on a board.
 
 **Stage 4 has run with PSRAM as memory**, executing `fibforever` out of the
 in-package PSRAM and printing the sequence correctly. `hello` has not been
@@ -391,9 +393,9 @@ LED:
 
 | | before PSRAM | with PSRAM |
 |---|---|---|
-| Logic | 4412 / 8640 (51%) | **6526 / 8640 (76%)** |
-| Registers | 1155 / 6771 (17%) | **1964 / 6771 (29%)** |
-| BSRAM | 7 / 26 (4 `k2g_mem` + 3 regfile) | **7 / 26** (4 IP + 3 regfile) |
+| Logic | 4412 / 8640 (51%) | **6945 / 8640 (81%)** |
+| Registers | 1155 / 6771 (17%) | **2057 / 6771 (31%)** |
+| BSRAM | 7 / 26 (4 `k2g_mem` + 3 regfile) | **11 / 26** (4 IP + 3 regfile + 4 I-cache) |
 | Bitstream | 3.5 MB | 3.5 MB |
 
 The controller IP is most of the growth: the `psram` stage builds the IP with
@@ -439,6 +441,7 @@ runs on a divided clock. It is now a divide-by-**2** at **13.5 MHz**.
 | v1, single-cycle execute | 6.75 MHz | 10.0 MHz | 28 |
 | after Phase 2b, decode split out | **13.5 MHz** | **16.3 MHz** | **13** |
 | after Phase 3, memory is PSRAM | **13.5 MHz** | **17.99 MHz** | 22 |
+| after Phase 4b, with the I-cache | **13.5 MHz** | **15.85 MHz** | 24 |
 
 **Observed running on hardware** at 13.5 MHz after a rebuild and reflash, from
 the Phase 2b build.
@@ -450,8 +453,8 @@ Phase 3 added the memory domain. The design's own clocks all meet:
 | Clock | Constraint | Actual Fmax | Logic levels |
 |---|---|---|---|
 | `clk_27m` | 27.000 MHz | 120.7 MHz | 5 |
-| `clk_sys` | 13.500 MHz | 17.99 MHz | 22 |
-| `clk_out` (PSRAM user side) | 67.500 MHz | 67.98 MHz | 7 |
+| `clk_sys` | 13.500 MHz | 15.85 MHz | 24 |
+| `clk_out` (PSRAM user side) | 67.500 MHz | 67.63 MHz | 7 |
 
 `clk_out` has **0.7% margin**, which is not a margin. Its worst path starts
 inside the controller's temperature auto-adjust logic and comes out through
