@@ -263,6 +263,24 @@ return — the protocol wants around 150 µs before the first transaction, and t
 shortened build already took ~497 µs to reach the bus. Allow a second or two
 after reset before reading anything into the LEDs.
 
+### The PLL will not take every divider, and says nothing when it refuses
+
+Retuning to 81 MHz took four builds because `ODIV_SEL` is not free and every
+rejection is `gw_sh exit 1` with a **zero-byte log**:
+
+| FBDIV_SEL | ODIV_SEL | CLKOUT | VCO | |
+|---|---|---|---|---|
+| 2 | 8 | 81 | 648 | fails |
+| 4 | 8 | 135 | 1080 | fails — so it is ODIV 8 itself, not the frequency |
+| 2 | 6 | 81 | 486 | fails — VCO too low in practice |
+| 4 | 6 | 135 | 810 | **works** (the old setting) |
+| 2 | 10 | 81 | 810 | **works** (the current one) |
+
+So the documented VCO range of 400–1200 MHz is wider than this part accepts,
+and `ODIV_SEL` takes some values and not others. Keeping VCO at **810** — the
+one value proven twice — is the cheap way to stay out of it. `k2g_pll.sv`
+carries this table too.
+
 ### The memory clock is a GENERATION parameter, not an operating range
 
 "Memory Clock — Expected frequency — 50 MHz~166 MHz" appears in Table 6-1,
@@ -350,8 +368,8 @@ the place-and-route report: the controller divides `memory_clk` by two.
 
 | | |
 |---|---|
-| `memory_clk` from the rPLL | 135 MHz (27 × 5) |
-| `clk_out` | **67.5 MHz**, measured |
+| `memory_clk` from the rPLL | 81 MHz (27 × 3), was 135 |
+| `clk_out` | **40.5 MHz** (was 67.5, measured) |
 | Logic in that domain | 75.25 MHz actual, 11.5% margin |
 
 **135 MHz, not the 166 the IP was configured for.** At 162 the user clock is
@@ -393,9 +411,9 @@ LED:
 
 | | before PSRAM | with PSRAM |
 |---|---|---|
-| Logic | 4412 / 8640 (51%) | **6945 / 8640 (81%)** |
-| Registers | 1155 / 6771 (17%) | **2057 / 6771 (31%)** |
-| BSRAM | 7 / 26 (4 `k2g_mem` + 3 regfile) | **11 / 26** (4 IP + 3 regfile + 4 I-cache) |
+| Logic | 4412 / 8640 (51%) | **7637 / 8640 (89%)** |
+| Registers | 1155 / 6771 (17%) | **2239 / 6771 (34%)** |
+| BSRAM | 7 / 26 (4 `k2g_mem` + 3 regfile) | **15 / 26** (4 IP + 3 regfile + 4 I$ + 4 D$) |
 | Bitstream | 3.5 MB | 3.5 MB |
 
 The controller IP is most of the growth: the `psram` stage builds the IP with
@@ -442,6 +460,7 @@ runs on a divided clock. It is now a divide-by-**2** at **13.5 MHz**.
 | after Phase 2b, decode split out | **13.5 MHz** | **16.3 MHz** | **13** |
 | after Phase 3, memory is PSRAM | **13.5 MHz** | **17.99 MHz** | 22 |
 | after Phase 4b, with the I-cache | **13.5 MHz** | **15.85 MHz** | 24 |
+| after Phase 4c, with both caches | **13.5 MHz** | **14.35 MHz** | 22 |
 
 **Observed running on hardware** at 13.5 MHz after a rebuild and reflash, from
 the Phase 2b build.
@@ -453,21 +472,40 @@ Phase 3 added the memory domain. The design's own clocks all meet:
 | Clock | Constraint | Actual Fmax | Logic levels |
 |---|---|---|---|
 | `clk_27m` | 27.000 MHz | 120.7 MHz | 5 |
-| `clk_sys` | 13.500 MHz | 15.85 MHz | 24 |
-| `clk_out` (PSRAM user side) | 67.500 MHz | 67.63 MHz | 7 |
+| `clk_sys` | 13.500 MHz | 14.35 MHz | 22 |
+| `clk_out` (PSRAM user side) | 40.500 MHz | 55.39 MHz | 7 |
 
-`clk_out` has **0.7% margin**, which is not a margin. Its worst path starts
-inside the controller's temperature auto-adjust logic and comes out through
-`rd_data` into the adapter's line buffer, so almost all of it belongs to the
-IP. Registering that boundary to remove the adapter's share was tried twice and
-made the number worse both times — 66.05 MHz and forty more failing endpoints —
-because synthesis retimes the stage back out unless forced, and gains nothing
-when it is forced. The lever that would work is a lower memory clock, which
-costs nothing measurable; see the note above on the memory clock being a
-generation parameter.
+**Every setup path closes.** That took regenerating the IP for a **81 MHz**
+memory clock, down from 135, which makes `clk_out` 40.5 MHz.
 
-**Nine setup and eighteen hold endpoints do not close, and all of them are
-inside the IP** — the DLL's step signals and the SERDES `CALIB` pins, on paths
+It was not always so. With both caches in and the memory clock still at 135,
+`clk_out` reported **64.63 MHz against a 67.500 requirement** — 29 failing
+setup endpoints. The caches are not in that domain and never were; they are
+entirely in `clk_sys`. What they did was take up area, and at 89% utilization
+the placer had less room, so the `clk_out` logic spread out and its routes
+grew. The same endpoints measured **+0.10 ns at 76% utilization** and
+**-0.66 ns at 89%**.
+
+Lowering the memory clock fixes it by making the requirement smaller rather
+than the logic faster, which is the only lever that reaches paths this design
+mostly does not own. 81 was picked over 108 to close the controller's INTERNAL
+`memclk` <-> `clk_out` group as well: those needed the memory-clock period
+1.59x longer, so <= 85 MHz, and 81 is the clean 27 x 3 point below it.
+
+| | at 135 MHz | at 81 MHz |
+|---|---|---|
+| setup violations | 29 | **0** |
+| `clk_out` | 64.63 against 67.50 | **55.39 against 40.50** |
+| `clk_sys` | 15.89 against 13.50 | 14.35 against 13.50 |
+
+Two things worth keeping in view. `clk_sys` moved from 15.89 to 14.35 across
+that rebuild although nothing in its domain changed — that is placement spread
+at 89% utilization, and 6% is the narrowest margin it has had. And the cost of
+the slower memory clock is miss latency only: 40.5 MHz x 64 bits is 2.6 Gbit/s
+against the 0.4 a 13.5 MHz core can use.
+
+
+**The fifteen hold violations are all inside the IP** — the DLL's step signals and the SERDES `CALIB` pins, on paths
 between the controller's own 135 MHz and its 67.5 MHz user clock. None touch
 the core, the adapter or the CDC FIFOs. The `psram` stage, which passes on
 hardware, reports **557** violated endpoints of the same class, so this is

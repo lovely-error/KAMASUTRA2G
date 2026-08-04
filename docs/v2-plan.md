@@ -660,19 +660,52 @@ both machines. **That program does not exist yet** — `emu/programs/` has nothi
 it is the only test that proves the write-back D$ and the I$ agree, so it is part of the phase
 rather than a nice-to-have.
 
-**Where the logic budget stands with the I-cache in: 6945 / 8640, 81%.** The I$ cost 419 cells, so
-1695 are left for the D$ -- which needs dirty bits and a victim writeback path the I$ does not, so
-it will be bigger. If it does not fit, the levers in order are cache size, tag width, then the
-register file's third read port. BSRAM is 11 of 26 with 4 more to come, which is comfortable.
+**4c done -- the data cache.** `rtl/k2g_dcache.sv`: same geometry, write-back, write-allocate, with
+a dirty bit per line and a victim writeback that is one 32-beat write burst driven out of the data
+array. It cost **711 cells** against the I$'s 419, which is the dirty bits, the writeback stream and
+the wider state machine.
+
+It also carries a **flush** -- walk every line, write back the dirty ones, invalidate -- built now
+rather than with `ICINVR` because the cosimulation needed it first: a write-back cache still holding
+dirty lines when the program stops has a memory image the emulator does not, and the memory
+comparison would report a divergence that is not one. `ICINVR` wants the same walk restricted to a
+range.
+
+**Both caches fit: 7637 / 8640, 89%**, BSRAM 15 of 26 -- and getting there cost a clock and then
+bought it back. With the memory clock still at 135 MHz, `clk_out` reported **64.63 MHz against
+67.500** and 29 failing setup endpoints, having had 0.7% margin with only the I$ in.
+
+Zero of those paths were inside the core, the caches or the adapter -- all three are in `clk_sys`,
+and nothing crosses the domains that is not a `k2g_cdc_fifo`. It was **area, not logic**: at 89%
+the placer had less room and the `clk_out` routes grew. The same endpoints measured +0.10 ns at 76%
+utilization and -0.66 ns at 89%.
+
+**Fixed by regenerating the IP for a 81 MHz memory clock**, down from 135, making `clk_out`
+40.5 MHz. That closes everything, including the controller's internal `memclk` <-> `clk_out` group
+which had never met timing at any frequency:
+
+| | at 135 MHz | at 81 MHz |
+|---|---|---|
+| setup violations | 29 | **0** |
+| `clk_out` | 64.63 against 67.50 | **55.39 against 40.50** |
+| `clk_sys` | 15.89 against 13.50 | 14.35 against 13.50 |
+
+The 15 remaining hold violations are all inside the IP on its calibration path, are
+frequency-independent, and were present in every build including the ones running on hardware. The
+cost of the slower memory clock is miss latency only -- 2.6 Gbit/s against the 0.4 a 13.5 MHz core
+can use. `docs/bring-up.md` records the PLL divider values the toolchain silently refuses.
 
 ---
 
 ## Risks
 
 - **Logic utilization is the binding constraint, not BSRAM.** v1 was at 55% of 8640 before a
-  pipeline, two caches, a CDC FIFO and the PSRAM IP; it is at **81%** with the instruction cache in
-  and the data cache still to come. BSRAM is comfortable (11 of 26 used, 4 more to come); LUTs are
-  not. Synthesize each module as
+  pipeline, two caches, a CDC FIFO and the PSRAM IP; it is at **89%** with everything in. BSRAM is
+  comfortable at 15 of 26; LUTs are not, and the first thing 89% cost was not logic but a clock --
+  `clk_out` went from +0.7% margin to -4.3% on congestion alone, with no new path in it. Recovered
+  by lowering the memory clock rather than by touching the design. `clk_sys` also moved 15.89 ->
+  14.35 across a rebuild that changed nothing in its domain, which is what placement spread looks
+  like at this utilization. Synthesize each module as
   it is written and record the number. If it overflows, the levers in order are cache size, tag
   width, then the register file's third read port.
 - **`clk_out` has 0.7% margin, and this module does not own the path.** 67.98 MHz against a 67.500

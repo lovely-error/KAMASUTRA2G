@@ -96,7 +96,14 @@ done
 SOURCES+=("$RTL"/tb/k2g_*.sv)
 SOURCES+=("$RTL"/tb/tb_*.sv)
 
-if ! "$QUESTA/vlog.exe" -sv -quiet +define+SIMULATION "+incdir+$RTL_WIN" "+incdir+$BRD_WIN" "${SOURCES[@]}" > vlog.log 2>&1 \
+# NOCACHE=1 takes both caches out of the path, so the core faces the latency
+# injector directly. The caches never accept a request they cannot answer next
+# cycle, so with them in the core never sees a slow response -- and everything
+# LATENCY= was built to test stops being tested. See tb_cosim.sv.
+NOCACHE_DEF=""
+[ "${NOCACHE:-0}" = "1" ] && NOCACHE_DEF="+define+K2G_COSIM_NOCACHE"
+
+if ! "$QUESTA/vlog.exe" -sv -quiet +define+SIMULATION $NOCACHE_DEF "+incdir+$RTL_WIN" "+incdir+$BRD_WIN" "${SOURCES[@]}" > vlog.log 2>&1 \
    || grep -qE '^\*\* Error' vlog.log; then
     echo "COMPILE FAILED"
     grep -E '^\*\* Error' vlog.log | head -20

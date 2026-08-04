@@ -106,14 +106,30 @@ module tb_cosim
   //
   // It is also where `k2g_mem_slow`'s burst support is first exercised --
   // nothing else sends `len != 0` at all.
+  //
+  // `K2G_COSIM_NOCACHE` takes both caches out and wires the core straight to
+  // memory. That configuration is not decoration: the caches never accept a
+  // request they cannot answer next cycle, so with them in place the core
+  // never sees a slow response and its variable-latency machinery -- the whole
+  // point of Phase 1's `LATENCY=40` gate -- stops being exercised. Two mutants
+  // reported MISSED the moment the data cache landed, which is how this was
+  // found. `rtl/sim/cosim.sh` sets it from `NOCACHE=1`.
   k2g_membus ibus_mem ();
 
+`ifdef K2G_COSIM_NOCACHE
+  assign ibus_mem.req_valid = ibus.req_valid;
+  assign ibus_mem.req       = ibus.req;
+  assign ibus.req_ready     = ibus_mem.req_ready;
+  assign ibus.rsp_valid     = ibus_mem.rsp_valid;
+  assign ibus.rsp_data      = ibus_mem.rsp_data;
+`else
   k2g_icache u_icache (
       .clk  (clk),
       .rst_n(rst_n),
       .up   (ibus),
       .down (ibus_mem)
   );
+`endif
 
   // The fetch port is read-only, so the same model serves it: `we` is always
   // zero. Responses are whole words on both ports now -- the core picks the
@@ -130,11 +146,38 @@ module tb_cosim
       .b_rdata    (imem_data)
   );
 
+  // THE DATA CACHE IS IN THE PATH HERE TOO, and it is write-back, which the
+  // memory comparison at the end has to account for: dirty lines that never
+  // got evicted are in the cache and not in memory, and the emulator has no
+  // cache. `dflush` below empties it before anything is compared.
+  k2g_membus dbus_mem ();
+
+  logic dflush_req = 1'b0;
+  logic dflush_busy;
+
+`ifdef K2G_COSIM_NOCACHE
+  assign dbus_mem.req_valid = dbus.req_valid;
+  assign dbus_mem.req       = dbus.req;
+  assign dbus.req_ready     = dbus_mem.req_ready;
+  assign dbus.rsp_valid     = dbus_mem.rsp_valid;
+  assign dbus.rsp_data      = dbus_mem.rsp_data;
+  assign dflush_busy        = 1'b0;
+`else
+  k2g_dcache u_dcache (
+      .clk       (clk),
+      .rst_n     (rst_n),
+      .up        (dbus),
+      .down      (dbus_mem),
+      .flush_req (dflush_req),
+      .flush_busy(dflush_busy)
+  );
+`endif
+
   k2g_mem_slow u_slow (
       .clk        (clk),
       .rst_n      (rst_n),
       .max_latency(latency),
-      .bus        (dbus),
+      .bus        (dbus_mem),
       .b_addr     (dmem_addr),
       .b_en       (dmem_en),
       .b_we       (dmem_we),
@@ -186,6 +229,20 @@ module tb_cosim
   int retired = 0;
   int errors  = 0;
   int checks  = 0;
+
+  task automatic dflush();
+    int n;
+    dflush_req = 1'b1;
+    n = 0;
+    while (!dflush_busy && n < 1000)   begin @(posedge clk); n++; end
+    dflush_req = 1'b0;
+    while (dflush_busy && n < 200000)  begin @(posedge clk); n++; end
+    if (n >= 200000) begin
+      $display("TB_FAIL: the data cache flush never finished");
+      errors++;
+    end
+  endtask
+
 
   string image_path;
   int    max_insns = 200000;
@@ -488,6 +545,11 @@ module tb_cosim
       int unsigned addr;
       bit          seen [int];
       int unsigned rtl_word;
+
+      // Empty the write-back cache first. Without this every store still
+      // sitting in a dirty line reads as a divergence -- the RTL's memory
+      // genuinely does not have it yet, and the emulator's does.
+      dflush();
 
       n_dirty = k2g_dpi_mem_dirty_count();
       for (int unsigned i = 0; i < n_dirty; i++) begin

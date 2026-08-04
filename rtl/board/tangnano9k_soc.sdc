@@ -28,18 +28,23 @@ create_clock -name clk_sys -period 74.074 -waveform {0 37.037} [get_nets {div[0]
 // the constraints are read and `get_clocks` on it fails outright. So it has to
 // be declared to be named, and declaring it with `create_clock` is wrong: a
 // base clock has no master, so the tool stops knowing that this and the
-// 135 MHz it is divided from share a source, and analyses every path between
-// them with an invented 7.4 ns relation and 4.5 ns of skew. That is how a
+// memory clock it is divided from share a source, and analyses every path
+// between them with an invented relation and 4.5 ns of skew. That is how a
 // constraint makes a report look better while meaning less -- it raised the
 // reported Fmax from 67.2 to 70.0 MHz and turned fifty IP-internal paths into
 // violations.
 // Declared as a CHAIN from the crystal, because `-source` will only accept a
 // point where a clock has been declared -- the PLL output the tool derives by
 // itself cannot be named here, in `-source` or in `get_clocks`, since
-// auto-derivation happens after these constraints are read. So the PLL's 135
-// MHz is declared too, at the same ratio the tool would have derived (27 x 5),
+// auto-derivation happens after these constraints are read. So the PLL's
+// memory clock is declared too, at the same ratio the tool would have derived,
 // purely so that clk_out has a master to hang from.
-create_generated_clock -name memclk -source [get_ports {clk_27m}] -multiply_by 5 [get_nets {memory_clk}]
+//
+// 27 x 3 = 81 MHz, halved by the IP to 40.5 MHz. MUST TRACK k2g_pll.sv AND THE
+// IP's MEMORY_CLK -- all three are the same number in three places, and the
+// memory clock is a generation parameter, so changing it means regenerating
+// the IP as well as editing here.
+create_generated_clock -name memclk -source [get_ports {clk_27m}] -multiply_by 3 [get_nets {memory_clk}]
 create_generated_clock -name clk_out -source [get_nets {memory_clk}] -divide_by 2 [get_nets {psram_clk_out}]
 
 // This line is load-bearing rather than tidy. The core and the controller are

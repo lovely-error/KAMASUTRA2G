@@ -90,7 +90,7 @@ k2g_core.sv
       mem_pending <= 1'b0;
 detect
 -
-cosim40
+cosim40nc
 --
 abandoned-fetch-not-dropped
 k2g_core.sv
@@ -106,7 +106,7 @@ k2g_core.sv
                             1'b1 &&
 detect
 -
-cosim40
+cosim40nc
 --
 no-value-forwarding
 k2g_core.sv
@@ -356,6 +356,54 @@ detect
 -
 cosim0
 --
+dcache-dirty-line-not-written-back
+k2g_dcache.sv
+          if (valid[req_idx] && dirty[req_idx]) begin
+          if (1'b0) begin
+detect
+tb_dcache
+run
+--
+dcache-store-does-not-dirty
+k2g_dcache.sv
+      if (take && is_store) dirty[req_idx] <= 1'b1;
+      if (take && is_store) dirty[req_idx] <= 1'b0;
+detect
+tb_dcache
+run
+--
+dcache-writeback-to-the-new-address
+k2g_dcache.sv
+          wb_base <= {{(32 - ADDR_W){1'b0}}, tags[req_idx], req_idx,
+          wb_base <= {{(32 - ADDR_W){1'b0}}, req_tag, req_idx,
+detect
+tb_dcache
+run
+--
+dcache-store-ignores-byte-lanes
+k2g_dcache.sv
+      b_we    = (take && is_store) ? up.req.we : 4'b0000;
+      b_we    = (take && is_store) ? 4'b1111 : 4'b0000;
+detect
+tb_dcache
+run
+--
+dcache-flush-drops-dirty-lines
+k2g_dcache.sv
+          if (valid[fl_idx] && dirty[fl_idx]) begin
+          if (1'b0) begin
+detect
+tb_dcache
+run
+--
+dcache-loses-stores-in-cosim
+k2g_dcache.sv
+      b_we    = (take && is_store) ? up.req.we : 4'b0000;
+      b_we    = 4'b0000;
+detect
+-
+cosim0
+--
 copier-ignores-backpressure
 board/k2g_soc.sv
     end else if (booting && cbus.req_ready) begin
@@ -441,6 +489,11 @@ run_case() {
         run)     K2G_RTL="$SCRATCH/rtl" bash "$HERE/run.sh" "$tb" > "$log" 2>&1 ;;
         cosim0)  K2G_RTL="$SCRATCH/rtl" LATENCY=0  bash "$HERE/cosim.sh" 1 > "$log" 2>&1 ;;
         cosim40) K2G_RTL="$SCRATCH/rtl" LATENCY=40 bash "$HERE/cosim.sh" 1 > "$log" 2>&1 ;;
+        # WITHOUT THE CACHES. Neither cache ever accepts a request it cannot
+        # answer next cycle, so with them in the path the core never sees a
+        # slow response and its variable-latency machinery is not exercised at
+        # all. These two mutants went MISSED the day the data cache landed.
+        cosim40nc) K2G_RTL="$SCRATCH/rtl" NOCACHE=1 LATENCY=40 bash "$HERE/cosim.sh" 1 > "$log" 2>&1 ;;
         icosim)  K2G_RTL="$SCRATCH/rtl" ILATENCY=25 bash "$HERE/cosim.sh" 1 > "$log" 2>&1 ;;
         # One program rather than the whole sweep: the fault guards each have a
         # program written for them, and a full cosim run is 90 seconds against

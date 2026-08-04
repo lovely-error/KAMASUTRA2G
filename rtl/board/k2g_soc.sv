@@ -219,10 +219,31 @@ module k2g_soc
   wire logic cpu_rst_n = sys_rst_n && !booting;
 
   // ---- memory ------------------------------------------------------------
+  // ---- data cache ---------------------------------------------------------
+  // Between the core and the mux, so the boot copier writes straight past it.
+  // That is what it has to do: the copier is laying down the program while the
+  // cache is held in reset, and a cache that saw those writes would have to be
+  // flushed before the core could fetch through the instruction cache.
+  //
+  // `flush_req` is tied off. `ICINVR` is what will drive it -- clean this
+  // cache over a range, then invalidate the I$ over the same range -- and
+  // until that exists self-modifying code does not work. Nothing in
+  // `emu/programs/` tries.
+  k2g_membus dbus_mem ();
+
+  k2g_dcache u_dcache (
+      .clk       (clk_sys),
+      .rst_n     (cpu_rst_n),
+      .up        (dbus),
+      .down      (dbus_mem),
+      .flush_req (1'b0),
+      .flush_busy()
+  );
+
   k2g_membus_mux u_dmux (
       .sel (!booting),
       .up_a(cbus),
-      .up_b(dbus),
+      .up_b(dbus_mem),
       .down(mbus)
   );
 
