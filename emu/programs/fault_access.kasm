@@ -15,7 +15,6 @@
 ; Unlike the decode faults, alignment cannot be known before execute: the
 ; address is a register plus a displacement. So this stays predicated like any
 ; other execute-time fault -- see fault_squashed.kasm.
-; expect: FAULT_MISALIGNED_LOAD
 
         .org    0
 

@@ -10,9 +10,10 @@
 #   bash rtl/sim/cosim.sh 5               # shipped programs + 5 random seeds
 #   bash rtl/sim/cosim.sh 0 hello.bin     # one specific image
 #
-# Every run also sweeps the ten faulting generator programs, one per cause.
-# A program carrying a `; expect:` header must stop with that cause: agreeing
-# about a program that was supposed to fault and did not is not a pass.
+# Every run also sweeps the ten faulting generator programs, one per cause,
+# where the expected cause comes from the generator that built the image.
+# The shipped programs' own expected causes live in emu/tests/programs.rs:
+# agreement between the two machines is not the same as either being right.
 #
 # A failing seed is reproducible:
 #   cd emu && cargo run --release --bin kgen -- --seed N --count 250 -o r.bin
@@ -89,15 +90,6 @@ if ! "$QUESTA/vlog.exe" -sv -quiet +define+SIMULATION "+incdir+$RTL_WIN" "+incdi
     exit 1
 fi
 
-# A program's `; expect:` header, if it has one. Naming the cause the program
-# is supposed to stop with is what keeps a test from passing by doing nothing:
-# the cosimulation only ever asks whether the two machines agree, and they
-# agree perfectly well about a program that was meant to fault and did not.
-expect_of() {
-    [ -f "$1" ] || return 0
-    awk '/^;[ 	]*expect:/ { print $3; exit }' "$1"
-}
-
 run_one() {
     local img="$1" label="$2" want="${3:-}"
     local log="$WORK/cosim_${label}.log"
@@ -153,7 +145,7 @@ else
         [ -f "$src" ] || continue
         ( cd "$ROOT/emu" && cargo run --release --quiet --bin kasm -- \
             "programs/$prog.kasm" -o "$WORK/$prog.bin" ) > /dev/null 2>&1
-        run_one "$WORK/$prog.bin" "$prog" "$(expect_of "$src")" || fail=1
+        run_one "$WORK/$prog.bin" "$prog" || fail=1
     done
 
     # Then the same generator ending in a deliberate fault, one cause per

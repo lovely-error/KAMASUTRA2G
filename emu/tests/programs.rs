@@ -9,10 +9,19 @@ use std::path::PathBuf;
 
 use emu::asm::assemble;
 use emu::devices::{Devices, UartIo};
-use emu::fault::StopReason;
+use emu::fault::{FaultCause, StopReason};
 use emu::interp::Interpreter;
 
 const MEM: usize = 64 * 1024;
+
+/// The v2 address space, which must match `MEM_BYTES` in `rtl/k2g_core.sv`.
+///
+/// The fault programs below run against this rather than against `MEM`,
+/// because one of them is about the edge of memory: `fault_range` loads from
+/// the first address past the end, and under a 64 KiB test memory it would
+/// fault for a reason that has nothing to do with what it is testing -- and
+/// would keep passing if the real address space grew past its address.
+const ADDRESS_SPACE: usize = 8 * 1024 * 1024;
 
 fn programs_dir() -> PathBuf {
 	PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("programs")
@@ -52,6 +61,86 @@ fn run_file(name: &str) -> (String, StopReason, Vec<u32>) {
 	let src = std::fs::read_to_string(&path)
 		.unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
 	run_source(&src, b"")
+}
+
+/// How each shipped program is required to stop. `None` means a clean `HALT`.
+///
+/// This is the half of the fault programs' job that the cosimulation cannot
+/// do. The cosimulation asks only whether the two machines agree, and they
+/// agree perfectly well about a program that was meant to fault and did not --
+/// which is not hypothetical: the first out-of-range program written here
+/// squared an address until it wrapped to 0, then compared two identical clean
+/// halts and passed.
+///
+/// Stating it here rather than in a header comment in the `.kasm` means a
+/// wrong cause is a compile error and a missing entry is a missing test,
+/// instead of a line the harness quietly fails to parse and then checks
+/// nothing. Together with the cosimulation's cause comparison it also pins the
+/// RTL: if the emulator stops the way this table says, and the RTL stops the
+/// way the emulator does, the RTL stops the way this table says.
+const PROGRAM_OUTCOMES: &[(&str, Option<FaultCause>)] = &[
+	("hazard.kasm", None),
+	// F32 is reserved (spec 11).
+	("f32_operand.kasm", Some(FaultCause::FpUnimplemented)),
+	("f32_store.kasm", Some(FaultCause::FpUnimplemented)),
+	("f32_predicate.kasm", Some(FaultCause::FpUnimplemented)),
+	("f32_escape.kasm", None),
+	// The access faults, which depend on a register value.
+	("fault_access.kasm", Some(FaultCause::MisalignedLoad)),
+	("fault_store.kasm", Some(FaultCause::MisalignedStore)),
+	("fault_range.kasm", Some(FaultCause::AddrOutOfRange)),
+	("fault_port.kasm", Some(FaultCause::BadCspPort)),
+	("fault_fetch.kasm", Some(FaultCause::MisalignedFetch)),
+	("fault_squashed.kasm", None),
+	// The decode faults, which are properties of the encoding (spec 8.1).
+	("fault_unpredicated.kasm", Some(FaultCause::DivUnimplemented)),
+	("fault_prefix.kasm", Some(FaultCause::PrefixChainTooLong)),
+	("fault_opcode.kasm", Some(FaultCause::IllegalOpcode)),
+	("fault_condcode.kasm", Some(FaultCause::IllegalPrefixCombo)),
+];
+
+/// Runs a program against the real address space and reports how it stopped.
+fn stop_of(name: &str) -> StopReason {
+	let path = programs_dir().join(name);
+	let src = std::fs::read_to_string(&path)
+		.unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+	let program = match assemble(&src) {
+		Ok(p) => p,
+		Err(errors) => {
+			let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+			panic!("{name}: assembly failed:
+  {}", msgs.join("
+  "));
+		}
+	};
+	let mut mem = vec![0u16; ADDRESS_SPACE / 2];
+	let bytes = program.to_bytes();
+	{
+		let dst =
+			unsafe { std::slice::from_raw_parts_mut(mem.as_mut_ptr() as *mut u8, ADDRESS_SPACE) };
+		let o = program.origin as usize;
+		dst[o..o + bytes.len()].copy_from_slice(&bytes);
+	}
+	let mut interp = Interpreter::with_devices(
+		mem.as_mut_ptr() as *mut (),
+		ADDRESS_SPACE,
+		Devices::new(UartIo::buffered()),
+	);
+	interp.ip = program.origin;
+	interp.run_bounded(1_000_000)
+}
+
+#[test]
+fn shipped_programs_stop_the_way_they_are_meant_to() {
+	for (name, want) in PROGRAM_OUTCOMES {
+		let stop = stop_of(name);
+		let ok = match (want, stop) {
+			(Some(cause), StopReason::Faulted(f)) => f.cause == *cause,
+			(None, StopReason::Halted) => true,
+			_ => false,
+		};
+		assert!(ok, "{name}: expected {want:?}, got {stop:?}");
+	}
 }
 
 // -------------------------------------------------------------------------

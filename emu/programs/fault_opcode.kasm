@@ -8,7 +8,6 @@
 ;
 ; Written as a `.word` because an assembler that emitted this on request would
 ; be a bug in the assembler.
-; expect: FAULT_ILLEGAL_OPCODE
 
         .org    0
 

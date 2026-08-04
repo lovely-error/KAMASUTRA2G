@@ -3,7 +3,6 @@
 ; The milestone program: proof the machine can do I/O at all. I/O is not
 ; memory-mapped -- `in`/`out` assemble to CSP-prefixed loads and stores into a
 ; separate port space (docs/isa-spec.md 9).
-; expect: FAULT_HALT_INSN
 
 UART_DATA = 0x00
 

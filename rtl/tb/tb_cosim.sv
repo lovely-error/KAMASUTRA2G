@@ -157,16 +157,18 @@ module tb_cosim
 
   string image_path;
   int    max_insns = 200000;
-  // The cause the program is supposed to stop with, from its `; expect:`
-  // header (see rtl/sim/cosim.sh). Empty means "no expectation" -- the random
-  // seeds and the ordinary programs do not carry one.
+  // The cause a generated faulting image is supposed to stop with, supplied by
+  // the generator that built it (`kgen --fault-cause`). Empty means no
+  // expectation, which is every other image.
   //
-  // Agreement between the two machines is not the same as either being right.
-  // A program written to test a fault passes the comparison just as well by
-  // not faulting at all, in both machines -- which is how the first
-  // out-of-range program here squared an address until it wrapped to 0 and
-  // then compared two identical clean halts. Naming the expected cause is what
-  // stops a test from quietly measuring nothing.
+  // Agreement between the two machines is not the same as either being right:
+  // a program written to test a fault passes the comparison just as well by
+  // not faulting at all, in both machines. For the shipped programs that is
+  // settled in emu/tests/programs.rs, where the expected cause is a FaultCause
+  // rather than a string and a wrong one will not compile. A generated image
+  // has no source file to hang a table off, and what needs checking is
+  // precisely that kgen's chosen instruction and its reported cause still
+  // agree -- so for those it is checked here.
   string expect_cause = "";
   // A program that never halts is a legitimate thing to compare: run it to the
   // instruction budget and pass if the two machines agreed the whole way.

@@ -13,7 +13,6 @@
 ;
 ; Written as a `.word` because the assembler only emits the five real
 ; conditions; there is no way to ask it for this.
-; expect: FAULT_ILLEGAL_PREFIX_COMBO
 
         .org    0
 

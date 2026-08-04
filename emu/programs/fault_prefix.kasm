@@ -15,7 +15,6 @@
 ;
 ; Written as raw `.word`s because there is no mnemonic for a bare prefix: a
 ; prefix with nothing to prefix is exactly what is being tested.
-; expect: FAULT_PREFIX_CHAIN_TOO_LONG
 
         .org    0
 

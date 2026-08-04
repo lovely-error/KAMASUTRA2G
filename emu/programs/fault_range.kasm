@@ -8,7 +8,6 @@
 ;
 ; v2 is 8 MB of PSRAM, flat at 0, so 0x800000 is the first address that is not
 ; there.
-; expect: FAULT_ADDR_OUT_OF_RANGE
 
         .org    0
 

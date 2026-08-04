@@ -10,7 +10,6 @@
 ; ISA looks at the predicate register's tag.
 ;
 ; The complementary case is f32_escape, which must NOT fault.
-; expect: FAULT_FP_UNIMPLEMENTED
 
         .org    0
 

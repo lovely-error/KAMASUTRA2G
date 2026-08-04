@@ -5,7 +5,6 @@
 ; landed on the loop's own TC rather than the HALT, the backward branch on a
 ; dead initialization); it produced the right answer by coincidence. Computing
 ; displacements from labels is the whole point of having an assembler.
-; expect: FAULT_HALT_INSN
 
 UART_DATA = 0x00
 
