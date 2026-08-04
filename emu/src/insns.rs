@@ -639,7 +639,7 @@ pub fn encode_add_rr(rix1: u16, rix2: u16) -> [u16;1] {
 }
 
 pub fn encode_add_ri(rix1: u16, imm:isize) -> [u16;2] {
-	debug_assert!(imm_in_bounds(imm, 15));
+	assert!(imm_in_bounds(imm, 15), "immediate {imm} does not fit 15 bits signed");
 	let imm5 = extract_bits(imm, 0, 5) as u16;
 	let imm10 = extract_bits(imm, 5, 10) as u16;
 	[
@@ -768,8 +768,12 @@ pub fn encode_cmp_lte_rr(rix1: u16, rix2: u16) -> [u16;1] {
 	]
 }
 
+// The four comparison-immediate helpers encode 10 prefix bits plus 5 from
+// arg2, so their range is 15 bits, not the 19 they used to assert. The wider
+// bound did not merely allow a bad value through: it truncated to a
+// *different, valid* immediate, so `imm = 32768` assembled as `imm = 0`.
 pub fn encode_cmp_gt_ri(rix1: u16, imm:isize) -> [u16;2] {
-	debug_assert!(imm_in_bounds(imm, 19));
+	assert!(imm_in_bounds(imm, 15), "immediate {imm} does not fit 15 bits signed");
 	let imm10 = extract_bits(imm, 5, 10) as u16;
 	let imm5 = extract_bits(imm, 0, 5) as u16;
 	[
@@ -779,7 +783,7 @@ pub fn encode_cmp_gt_ri(rix1: u16, imm:isize) -> [u16;2] {
 }
 
 pub fn encode_cmp_gte_ri(rix1: u16, imm:isize) -> [u16;2] {
-	debug_assert!(imm_in_bounds(imm, 19));
+	assert!(imm_in_bounds(imm, 15), "immediate {imm} does not fit 15 bits signed");
 	let imm10 = extract_bits(imm, 5, 10) as u16;
 	let imm5 = extract_bits(imm, 0, 5) as u16;
 	[
@@ -789,7 +793,7 @@ pub fn encode_cmp_gte_ri(rix1: u16, imm:isize) -> [u16;2] {
 }
 
 pub fn encode_cmp_lt_ri(rix1: u16, imm:isize) -> [u16;2] {
-	debug_assert!(imm_in_bounds(imm, 19));
+	assert!(imm_in_bounds(imm, 15), "immediate {imm} does not fit 15 bits signed");
 	let imm10 = extract_bits(imm, 5, 10) as u16;
 	let imm5 = extract_bits(imm, 0, 5) as u16;
 	[
@@ -799,7 +803,7 @@ pub fn encode_cmp_lt_ri(rix1: u16, imm:isize) -> [u16;2] {
 }
 
 pub fn encode_cmp_lte_ri(rix1: u16, imm:isize) -> [u16;2] {
-	debug_assert!(imm_in_bounds(imm, 19));
+	assert!(imm_in_bounds(imm, 15), "immediate {imm} does not fit 15 bits signed");
 	let imm10 = extract_bits(imm, 5, 10) as u16;
 	let imm5 = extract_bits(imm, 0, 5) as u16;
 	[
@@ -810,14 +814,20 @@ pub fn encode_cmp_lte_ri(rix1: u16, imm:isize) -> [u16;2] {
 
 // Control Flow (Disp & Transition)
 pub fn encode_disp_imm(imm: isize) -> [u16;1] {
-	debug_assert!(imm_in_bounds(imm, 10));
+	assert!(imm_in_bounds(imm, 10), "displacement {imm} does not fit 10 bits signed");
 	[
 		pack_6_10(LB::LB_DISPI as _, imm as _)
 	]
 }
 
+// 10 prefix bits + 10 from `DISPI` -- 20, not the 24 these used to assert.
+// Same aliasing as above: a displacement of 1 << 20 encoded identically to 0.
+//
+// All of these are `assert!` rather than `debug_assert!` on purpose. A release
+// build that silently encodes a different branch than the one asked for is the
+// worst of the available failures.
 pub fn encode_disp_imm_xim(imm:isize) -> [u16;2] {
-	debug_assert!(imm_in_bounds(imm, 24));
+	assert!(imm_in_bounds(imm, 20), "displacement {imm} does not fit 20 bits signed");
 	let imm2 = extract_bits(imm, 10, 20) as u16;
 	let imm1 = extract_bits(imm, 0, 10) as u16;
 	[
@@ -827,7 +837,7 @@ pub fn encode_disp_imm_xim(imm:isize) -> [u16;2] {
 }
 
 pub fn encode_disp_imm_xim_link(rix3: u16, imm:isize) -> [u16;3] {
-	debug_assert!(imm_in_bounds(imm, 24));
+	assert!(imm_in_bounds(imm, 20), "displacement {imm} does not fit 20 bits signed");
 	let imm2 = extract_bits(imm, 10, 20) as u16;
 	let imm1 = extract_bits(imm, 0, 10) as u16;
 	[

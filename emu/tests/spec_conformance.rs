@@ -346,6 +346,29 @@ fn spec_5_7_shra_follows_the_tags_signedness() {
 	assert_eq!(signed.regs[1].datatype, DataKind::S8);
 }
 
+/// `U32` is where the rule and the reasoning behind it come apart, so it is
+/// pinned separately.
+///
+/// The argument in 5.7 -- unsigned values are non-negative, so an arithmetic
+/// shift degenerates to a logical one -- holds only while the tag leaves bit 31
+/// clear, which is true of `U8` and `U16` but not of `U32`. `SHRA` is
+/// nonetheless specified as a plain 32-bit arithmetic shift, and stays one: the
+/// alternative is a shifter that changes behaviour on a runtime tag, which is
+/// exactly what made the old float path unimplementable in hardware.
+#[test]
+fn spec_5_7_shra_on_u32_shifts_bit_31_in() {
+	let r = run(&asm(&[
+		&encode_llc_b32(1, 0x8000_0000),
+		&encode_shra_ri(1, 1),
+		&encode_halt(),
+	]));
+	assert_eq!(
+		r.regs[1].bits, 0xC000_0000,
+		"SHRA is a 32-bit arithmetic shift regardless of tag (spec 5.7)"
+	);
+	assert_eq!(r.regs[1].datatype, DataKind::U32);
+}
+
 /// Extract writes the whole register; insert writes only the value.
 #[test]
 fn spec_5_8_extract_writes_all_state_insert_writes_only_value() {
@@ -472,6 +495,66 @@ fn spec_6_6_double_prime_last_one_wins() {
 		last_wins.regs[3].bits, 12,
 		"the last PrepareJump must win (spec 6.6); this used to panic"
 	);
+}
+
+// -------------------------------------------------------------------------
+// 4 -- the encoders must reject what they cannot encode
+// -------------------------------------------------------------------------
+//
+// Spec 4's table fixes the effective widths: 15 bits for an ALU or comparison
+// immediate, 20 for an extended DISPI. The comparison helpers used to assert 19
+// and the DISPI helpers 24, so an out-of-range value was not rejected -- it
+// truncated to a *different, valid* instruction. The asserts are unconditional
+// rather than debug-only for the same reason: a release build silently
+// encoding the wrong branch is the worst of the three outcomes.
+
+/// The exact aliasing the wrong bound allowed: 32768 encoded identically to 0.
+#[test]
+#[should_panic(expected = "does not fit 15 bits")]
+fn spec_4_comparison_immediate_beyond_15_bits_is_rejected() {
+	encode_cmp_gt_ri(1, 32768);
+}
+
+/// And 1 << 20 encoded identically to 0.
+#[test]
+#[should_panic(expected = "does not fit 20 bits")]
+fn spec_4_extended_dispi_beyond_20_bits_is_rejected() {
+	encode_disp_imm_xim(1 << 20);
+}
+
+/// The boundaries themselves still encode, and still round-trip through the
+/// decoder -- the fix must not shrink the usable range.
+#[test]
+fn spec_4_immediate_boundaries_still_encode() {
+	for imm in [16383isize, -16384] {
+		let cps = encode_cmp_gt_ri(1, imm);
+		let decoded =
+			emu::interp::decode_instruction(cps.as_ptr() as *const (), cps.len() * 2, 0)
+				.expect("decode");
+		match decoded.insn {
+			emu::interp::CanonInsn::Compare { rhs: emu::interp::CmpSrc::Imm(v), .. } => {
+				assert_eq!(v as i32, imm as i32, "15-bit comparison immediate {imm}");
+			}
+			other => panic!("expected Compare, got {other:?}"),
+		}
+	}
+
+	for disp in [524287isize, -524288] {
+		let cps = encode_disp_imm_xim(disp);
+		let decoded =
+			emu::interp::decode_instruction(cps.as_ptr() as *const (), cps.len() * 2, 0)
+				.expect("decode");
+		match decoded.insn {
+			emu::interp::CanonInsn::PrepareJump {
+				target: emu::interp::JumpTarget::RelImm(v),
+				..
+			} => {
+				// Displacements are scaled by 2 (spec 6.2).
+				assert_eq!(v as isize, disp * 2, "20-bit displacement {disp}");
+			}
+			other => panic!("expected PrepareJump, got {other:?}"),
+		}
+	}
 }
 
 // -------------------------------------------------------------------------
