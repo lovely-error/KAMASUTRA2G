@@ -284,6 +284,57 @@ miss penalty, so the same mechanism is worth considerably more after Phase 3 tha
 building it against the cache's real latency avoids sizing it twice. Start from the notes above
 rather than from scratch.
 
+### 2e -- the M stage, the file split, and the end of `stall`
+
+**Measured first, because the numbers in 2b are stale.** Those (14.53 MHz, 21 levels) predate
+Phase 3, which put the PSRAM adapter and the bus mux on `clk_sys`. As shipped today:
+
+| Constraint asked for | Actual | Levels |
+|---|---:|---:|
+| 13.5 MHz (as built) | 15.560 MHz | 26 |
+| 27 MHz (asked, to expose the path) | 21.037 MHz | 22 |
+
+The second row is worth having on its own: **5.5 MHz of the gap is slack the tool was never asked
+to recover.** Nothing in the RTL changed between those two builds, so the honest target for this
+phase's RTL work is 27 against 21, not against 15.6.
+
+`clk_sys` meets 13.5 MHz with zero negative slack, so its paths never appear in the 25-path setup
+report -- every path there belongs to the PSRAM IP on its own clock, and the core's own depth is
+invisible. Asking for 27 MHz is what makes the tool report it. The worst path, at -10.497 ns:
+
+```
+uop.src (the D->X register)
+  -> u_rf/values_...        register file read
+  -> xb_value               forwarding mux
+  -> load_addr              address generation
+  -> dbus.req.addr          bus request
+  -> start_load -> take_uop the fire decision
+  -> detect_info, do_perform
+  -> u_rf/values_...        register file write
+```
+
+Twenty-seven nodes, entirely inside `u_core`, and **no PSRAM adapter or bus mux anywhere in it** --
+the depth is the execute cone the plan predicted, not Phase 3's additions. Read left to right it is
+one instruction's whole life in a single cycle: read a register, forward it, add a displacement,
+present it to the bus, decide from that whether the instruction fires, and write the result back.
+
+Two things follow, and they are the two halves of this step:
+
+- **Address generation reaching the bus request belongs in different stages.** That is the M stage:
+  X computes `load_addr` and hands it on; M owns `dbus` and the wait for the response.
+- **`take_uop` sits in the middle of the path.** The fire decision is computed from the memory
+  request and then feeds writeback, which is the global `stall` in its most expensive form. That is
+  what the guarded-rule discipline removes -- not as tidiness, but because it is on the path.
+
+Sequence, each step ending at a green cosim:
+
+1. **M as a stage.** X issues, M waits, W writes back. Brings a third forwarding source and a
+   load-use interlock -- the substance of the step, and where the bugs will be.
+2. **Split the file** into `k2g_fetch.sv`, `k2g_exec.sv`, `k2g_lsu.sv`, `k2g_forward.sv`, leaving
+   `k2g_core.sv` as instantiation and wiring. Mechanical once (1) has drawn the boundary.
+3. **Retire `stall`,** replacing it with a `*_can_fire` guard per stage.
+
+
 | Stage | Work |
 |---|---|
 | **F** | PC generation, I-fetch request, shadow prefetch stream |
