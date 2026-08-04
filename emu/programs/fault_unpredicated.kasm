@@ -17,6 +17,7 @@
 ; including the predicate -- so `cond_met` was forced true for every decode
 ; fault. Rather than teach the hardware to carry a predicate into its fault
 ; path, the rule is now spelled out in spec 8 and the emulator follows it.
+; expect: FAULT_DIV_UNIMPLEMENTED
 
         .org    0
 

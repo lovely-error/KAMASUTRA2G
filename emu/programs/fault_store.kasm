@@ -5,6 +5,7 @@
 ; alignment being checked is derived from a different place than the address.
 ; A load that faults is also recoverable in a way a store is not -- by the time
 ; a wrong store is noticed, the bytes are already in memory.
+; expect: FAULT_MISALIGNED_STORE
 
         .org    0
 

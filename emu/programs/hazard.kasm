@@ -21,6 +21,7 @@
 ; The tag chain is the important one and the least obvious. A store takes its
 ; width from the SOURCE register's tag (spec 5.3), so an unforwarded tag does
 ; not produce a wrong value -- it silently writes the wrong number of bytes.
+; expect: FAULT_HALT_INSN
 
         .org    0
 

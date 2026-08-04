@@ -16,8 +16,18 @@
 //! extracts always have a non-zero span. A faulting program would still be a
 //! valid comparison, but it would stop early and test very little.
 //!
+//! That leaves the fault paths unreachable from here, and for a long time it
+//! left them unreachable from anything: deleting the misaligned-access check
+//! from `k2g_core.sv` outright passed every testbench and the whole
+//! cosimulation. `--fault` closes that. It generates the same clean program
+//! and replaces the closing `HALT` with one deliberately faulting instruction,
+//! so the fault is reached with several hundred instructions of randomized
+//! register contents, tags and flags behind it rather than the four
+//! instructions a directed program can set up.
+//!
 //! ```text
 //! kgen --seed 7 --count 200 -o random.bin
+//! kgen --seed 7 --count 200 --fault -o random_fault.bin
 //! ```
 
 use std::process::ExitCode;
@@ -97,7 +107,7 @@ fn rand_imm(rng: &mut Rng) -> isize {
 	}
 }
 
-fn gen_program(seed: u64, count: usize) -> Vec<u16> {
+fn gen_program(seed: u64, count: usize, fault: Option<usize>) -> Vec<u16> {
 	let mut rng = Rng::new(seed);
 	let mut out: Vec<u16> = Vec::new();
 
@@ -293,8 +303,91 @@ fn gen_program(seed: u64, count: usize) -> Vec<u16> {
 		}
 	}
 
-	out.extend_from_slice(&encode_halt());
+	match fault {
+		None => out.extend_from_slice(&encode_halt()),
+		Some(f) => out.extend_from_slice(&gen_fault(f, &mut rng)),
+	}
 	out
+}
+
+/// The faults a generated program can end with, and the cause each one raises.
+///
+/// One per cause the ISA defines and a program can reach; `DOUBLE_PRIME` is
+/// gone and `HALT_INSN` is the ordinary ending. The set is walked by index so
+/// a sweep covers every one rather than sampling.
+const FAULT_KINDS: usize = 10;
+
+fn fault_cause_name(kind: usize) -> &'static str {
+	match kind % FAULT_KINDS {
+		0 => "FAULT_DIV_UNIMPLEMENTED",
+		1 => "FAULT_FP_UNIMPLEMENTED",
+		2 => "FAULT_FP_UNIMPLEMENTED",
+		3 => "FAULT_MISALIGNED_LOAD",
+		4 => "FAULT_MISALIGNED_STORE",
+		5 => "FAULT_ADDR_OUT_OF_RANGE",
+		6 => "FAULT_BAD_CSP_PORT",
+		7 => "FAULT_BEXT_ZERO_SPAN",
+		8 => "FAULT_ILLEGAL_PREFIX_COMBO",
+		_ => "FAULT_MISALIGNED_FETCH",
+	}
+}
+
+/// Emits an instruction that faults with the cause `fault_cause_name` reports.
+///
+/// Registers are set up here rather than assumed: the generated program has
+/// been writing r0..r30 for hundreds of instructions, so nothing about their
+/// contents can be relied on.
+fn gen_fault(kind: usize, rng: &mut Rng) -> Vec<u16> {
+	let r = rand_reg(rng);
+	let r2 = rand_reg(rng);
+	let mut v: Vec<u16> = Vec::new();
+	match kind % FAULT_KINDS {
+		// Cut from v1, rejected in decode.
+		0 => v.extend_from_slice(&[pack_6_5_5(LB::LB_DIV as u16, r, r2)]),
+		// The two float opcodes, both rejected in decode.
+		1 => v.extend_from_slice(&[pack_6_5_5(LB::LB_LDF32 as u16, r, BASE_REG)]),
+		// An F32-tagged operand, which is an execute-time read-port check.
+		2 => {
+			v.extend_from_slice(&encode_rdt(r, RDT::RDT_F32));
+			v.extend_from_slice(&[pack_6_5_5(LB::LB_ADD as u16, r, r)]);
+		}
+		3 => {
+			v.extend_from_slice(&encode_llc_b32(r, 3));
+			v.extend_from_slice(&encode_ld_b32(r2, r));
+		}
+		4 => {
+			v.extend_from_slice(&encode_llc_b32(r, 1));
+			v.extend_from_slice(&encode_llc_b32(r2, 7)); // U32 tag: a 4-byte store
+			v.extend_from_slice(&encode_st(r, r2));
+		}
+		5 => {
+			// The first address past the 8 MB of PSRAM (spec 1.3).
+			v.extend_from_slice(&encode_llc_b32(r, 0x80_0000));
+			v.extend_from_slice(&encode_ld_b32(r2, r));
+		}
+		6 => {
+			v.extend_from_slice(&encode_llc_b32(r, 0x7FFF)); // not a port
+			v.extend_from_slice(&encode_ld_msr_32(r2, r));
+		}
+		// `BMX` with a zero span, then `SHL` -- the extract form (spec 5.8).
+		7 => v.extend_from_slice(&[
+			pack_6_5_5(LB::LB_BMX_0_0 as u16, 0, 0),
+			pack_6_5_5(LB::LB_SHL as u16, r, r2),
+		]),
+		// `BMX` on `SHRA`, which it does not reinterpret.
+		8 => v.extend_from_slice(&[
+			pack_6_5_5(LB::LB_BMX_0_0 as u16, 0, 4),
+			pack_6_5_5(LB::LB_SHRA as u16, r, r2),
+		]),
+		// An odd jump target, rejected where it is primed (spec 6.4).
+		_ => {
+			v.extend_from_slice(&encode_llc_b32(r, 7));
+			v.extend_from_slice(&encode_disp_reg_addr(r));
+		}
+	}
+	// Unreached, and there to keep the image well formed if it ever is.
+	v.extend_from_slice(&encode_halt());
+	v
 }
 
 fn main() -> ExitCode {
@@ -302,6 +395,7 @@ fn main() -> ExitCode {
 	let mut seed: u64 = 1;
 	let mut count: usize = 200;
 	let mut out_path = String::from("random.bin");
+	let mut fault: Option<usize> = None;
 
 	let mut i = 0;
 	while i < args.len() {
@@ -313,6 +407,29 @@ fn main() -> ExitCode {
 			"--count" => {
 				i += 1;
 				count = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(200);
+			}
+			"--fault" => {
+				// The kind defaults to the seed, so a sweep of seeds is also a
+				// sweep of causes rather than the same one every time.
+				i += 1;
+				match args.get(i).and_then(|s| s.parse::<usize>().ok()) {
+					Some(k) => fault = Some(k),
+					None => {
+						fault = Some(seed as usize);
+						if args.get(i).is_some_and(|s| !s.starts_with("--")) {
+							eprintln!("--fault takes a number or nothing");
+							return ExitCode::from(2);
+						}
+						i -= 1;
+					}
+				}
+			}
+			"--fault-cause" => {
+				// Prints the cause the image will stop with, for the harness.
+				i += 1;
+				let k = args.get(i).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+				println!("{}", fault_cause_name(k));
+				return ExitCode::SUCCESS;
 			}
 			"-o" => {
 				i += 1;
@@ -326,7 +443,7 @@ fn main() -> ExitCode {
 		i += 1;
 	}
 
-	let words = gen_program(seed, count);
+	let words = gen_program(seed, count, fault);
 	let mut bytes = Vec::with_capacity(words.len() * 2);
 	for w in &words {
 		bytes.extend_from_slice(&w.to_le_bytes());
@@ -334,10 +451,17 @@ fn main() -> ExitCode {
 
 	match std::fs::write(&out_path, &bytes) {
 		Ok(()) => {
-			println!(
-				"wrote {out_path}: seed {seed}, {count} instructions, {} code points",
-				words.len()
-			);
+			match fault {
+				None => println!(
+					"wrote {out_path}: seed {seed}, {count} instructions, {} code points",
+					words.len()
+				),
+				Some(k) => println!(
+					"wrote {out_path}: seed {seed}, {count} instructions, {} code points, ending in {}",
+					words.len(),
+					fault_cause_name(k)
+				),
+			}
 			ExitCode::SUCCESS
 		}
 		Err(e) => {

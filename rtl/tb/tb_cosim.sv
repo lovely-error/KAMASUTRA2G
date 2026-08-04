@@ -157,6 +157,17 @@ module tb_cosim
 
   string image_path;
   int    max_insns = 200000;
+  // The cause the program is supposed to stop with, from its `; expect:`
+  // header (see rtl/sim/cosim.sh). Empty means "no expectation" -- the random
+  // seeds and the ordinary programs do not carry one.
+  //
+  // Agreement between the two machines is not the same as either being right.
+  // A program written to test a fault passes the comparison just as well by
+  // not faulting at all, in both machines -- which is how the first
+  // out-of-range program here squared an address until it wrapped to 0 and
+  // then compared two identical clean halts. Naming the expected cause is what
+  // stops a test from quietly measuring nothing.
+  string expect_cause = "";
   // A program that never halts is a legitimate thing to compare: run it to the
   // instruction budget and pass if the two machines agreed the whole way.
   logic  forever_ok = 1'b0;
@@ -268,6 +279,7 @@ module tb_cosim
       $finish;
     end
     void'($value$plusargs("max=%d", max_insns));
+    void'($value$plusargs("expect_cause=%s", expect_cause));
     void'($value$plusargs("latency=%d", latency));
     void'($value$plusargs("ilatency=%d", ilatency));
     forever_ok = $test$plusargs("forever");
@@ -323,6 +335,17 @@ module tb_cosim
         // retired instruction rather than of the machine, so the answer does
         // not depend on how many cycles `halted` leads retirement by.
         stopped = (retire.cause != FAULT_NONE);
+        if (stopped && (expect_cause != "")) begin
+          // Compared by name so the expectation in the .kasm reads as the
+          // cause does everywhere else, and so no numeric table has to be
+          // kept in step in the shell script.
+          checks++;
+          if (retire.cause.name() != expect_cause) begin
+            $display("TB_FAIL: expected to stop with %s, stopped with %s",
+                     expect_cause, retire.cause.name());
+            errors++;
+          end
+        end
         if (stopped || emu_status != 0) begin
           checks++;
           if (stopped && (emu_status == 0)) begin

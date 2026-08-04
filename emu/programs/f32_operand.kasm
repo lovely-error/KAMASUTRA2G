@@ -15,6 +15,7 @@
 ;
 ; The machine halts on the fault, so one program can only ever test one read
 ; port; the others are f32_store, f32_predicate and f32_escape.
+; expect: FAULT_FP_UNIMPLEMENTED
 
         .org    0
 

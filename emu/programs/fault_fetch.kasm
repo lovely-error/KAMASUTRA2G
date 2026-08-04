@@ -14,6 +14,7 @@
 ; used to consume the jump latch before validating the target, so a faulting
 ; transfer cleared architectural state the RTL kept. The cosimulation compares
 ; `nisa`, and caught it.
+; expect: FAULT_MISALIGNED_FETCH
 
         .org    0
 

@@ -9,6 +9,7 @@
 ; from the read-port check -- which is what keeps `F32` a reserved encoding
 ; instead of a state a program cannot leave. And a false predicate reads
 ; nothing, so it faults on nothing, the same rule `DIV` follows.
+; expect: FAULT_HALT_INSN
 
         .org    0
 

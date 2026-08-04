@@ -570,6 +570,13 @@ in both, because the encoding argument stands on its own.
 `emu/programs/fault_unpredicated.kasm` and `fault_squashed.kasm` pin the two halves against each
 other through the cosimulation.
 
+Every fault in the table above is reached twice by `rtl/sim/cosim.sh`: once by a directed program
+whose `; expect:` header names the cause it must stop with, and once by `kgen --fault`, which
+reaches the same fault after a few hundred random instructions have filled the register file, the
+tags and the flags. The header is what keeps the first kind honest — the cosimulation asks only
+whether the two machines agree, and they agree about a program that was meant to fault and did
+not.
+
 ### 8.2 Reserved for later
 
 `TRAP_VECTOR` and `TRAP_ENABLE` (§9) are allocated but must read as 0 and have no effect. When

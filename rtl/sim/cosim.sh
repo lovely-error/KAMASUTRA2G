@@ -10,6 +10,10 @@
 #   bash rtl/sim/cosim.sh 5               # shipped programs + 5 random seeds
 #   bash rtl/sim/cosim.sh 0 hello.bin     # one specific image
 #
+# Every run also sweeps the ten faulting generator programs, one per cause.
+# A program carrying a `; expect:` header must stop with that cause: agreeing
+# about a program that was supposed to fault and did not is not a pass.
+#
 # A failing seed is reproducible:
 #   cd emu && cargo run --release --bin kgen -- --seed N --count 250 -o r.bin
 
@@ -85,12 +89,22 @@ if ! "$QUESTA/vlog.exe" -sv -quiet +define+SIMULATION "+incdir+$RTL_WIN" "+incdi
     exit 1
 fi
 
+# A program's `; expect:` header, if it has one. Naming the cause the program
+# is supposed to stop with is what keeps a test from passing by doing nothing:
+# the cosimulation only ever asks whether the two machines agree, and they
+# agree perfectly well about a program that was meant to fault and did not.
+expect_of() {
+    [ -f "$1" ] || return 0
+    awk '/^;[ 	]*expect:/ { print $3; exit }' "$1"
+}
+
 run_one() {
-    local img="$1" label="$2"
+    local img="$1" label="$2" want="${3:-}"
     local log="$WORK/cosim_${label}.log"
     "$QUESTA/vsim.exe" -c -quiet -sv_lib "$DPI" \
         -do "onerror {quit -code 1}; run -all; quit -f" \
-        "+image=$img" "+latency=$LATENCY" "+ilatency=$ILATENCY" tb_cosim > "$log" 2>&1
+        "+image=$img" "+latency=$LATENCY" "+ilatency=$ILATENCY" \
+        ${want:+"+expect_cause=$want"} tb_cosim > "$log" 2>&1
     if grep -q TB_PASS "$log"; then
         local n c
         n=$(grep -oE 'retired=[0-9]+' "$log" | tail -1 | cut -d= -f2)
@@ -139,7 +153,19 @@ else
         [ -f "$src" ] || continue
         ( cd "$ROOT/emu" && cargo run --release --quiet --bin kasm -- \
             "programs/$prog.kasm" -o "$WORK/$prog.bin" ) > /dev/null 2>&1
-        run_one "$WORK/$prog.bin" "$prog" || fail=1
+        run_one "$WORK/$prog.bin" "$prog" "$(expect_of "$src")" || fail=1
+    done
+
+    # Then the same generator ending in a deliberate fault, one cause per
+    # seed. The directed fault_* programs above reach each fault from four
+    # instructions of setup; these reach it after a few hundred, with the
+    # register file, the tags and the flags in whatever state the random
+    # program left them -- which is the part a hand-written program cannot
+    # arrange. The expected cause comes from kgen rather than a table here.
+    for k in $(seq 0 9); do
+        ( cd "$ROOT/emu" && cargo run --release --quiet --bin kgen --             --seed "$((k + 1))" --count "$COUNT" --fault "$k"             -o "$WORK/randf_$k.bin" ) > /dev/null 2>&1
+        want=$( cd "$ROOT/emu" && cargo run --release --quiet --bin kgen --             --fault-cause "$k" )
+        run_one "$WORK/randf_$k.bin" "random-fault[$k]" "$want" || fail=1
     done
 
     # Then random straight-line programs, which cover the execute path the two

@@ -8,6 +8,7 @@
 ; instruction never performs the access (spec 7). Decode-time faults are NOT --
 ; see spec 8: an encoding that cannot be executed is rejected whether or not
 ; this pass over it would have run.
+; expect: FAULT_HALT_INSN
 
         .org    0
 

@@ -10,6 +10,7 @@
 ; useful case: its width comes from the source register's tag (spec 5.3), so an
 ; F32 source is a float operand in the fullest sense rather than a tag nobody
 ; consults.
+; expect: FAULT_FP_UNIMPLEMENTED
 
         .org    0
 

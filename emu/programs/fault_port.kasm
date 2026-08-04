@@ -3,6 +3,7 @@
 ; I/O is a separate port space rather than part of memory (spec 9), so it has
 ; its own decode and its own way to be wrong. An unmapped port used to be an
 ; `unimplemented!()` in the emulator, which aborted the process.
+; expect: FAULT_BAD_CSP_PORT
 
         .org    0
 
