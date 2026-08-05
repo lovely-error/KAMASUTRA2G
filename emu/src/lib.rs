@@ -14,6 +14,8 @@ pub mod devices;
 pub mod dpi;
 pub mod dis;
 pub mod fault;
+pub mod hostproto;
 pub mod insns;
 pub mod interp;
+pub mod serial;
 pub mod sv_gen;

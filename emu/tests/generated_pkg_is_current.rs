@@ -91,6 +91,44 @@ fn opcode_tables_list_every_assigned_encoding() {
 
 /// The generated file must actually contain the opcode map, not just a header.
 /// Guards against the comparison above passing because both sides are empty.
+/// The host-control protocol has the same two-implementations problem as the
+/// opcode map -- Rust for `kctl`, SystemVerilog for `k2g_mon` -- so it takes the
+/// same guard.
+#[test]
+fn checked_in_host_package_matches_generator() {
+	assert_current(emu::hostproto::SV_OUTPUT_PATH, emu::hostproto::emit_host_pkg_sv());
+}
+
+/// Every frame type and NAK reason must appear in the protocol document.
+///
+/// The document is written by hand rather than generated, because the prose is
+/// the useful part and a generated table is one nobody reads. This is what
+/// stops a type being added to the wire without being written down: the
+/// generated package would carry it and the document would not.
+#[test]
+fn every_frame_type_is_documented() {
+	let path = repo_path(emu::hostproto::DOC_PATH);
+	let doc = std::fs::read_to_string(&path)
+		.unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
+
+	for (name, code, _) in emu::hostproto::FrameType::VARIANTS {
+		assert!(doc.contains(&format!("`{name}`")), "{name} is not in {}", path.display());
+		assert!(
+			doc.contains(&format!("`0x{code:02X}`")),
+			"{name}'s code 0x{code:02X} is not in {}",
+			path.display()
+		);
+	}
+	for (name, code) in emu::hostproto::NakReason::VARIANTS {
+		assert!(doc.contains(&format!("`{name}`")), "NAK {name} is not in {}", path.display());
+		assert!(
+			doc.contains(&format!("`0x{code:02X}`")),
+			"NAK {name}'s code 0x{code:02X} is not in {}",
+			path.display()
+		);
+	}
+}
+
 #[test]
 fn generated_package_is_not_trivially_empty() {
 	let sv = emu::sv_gen::emit_sv();

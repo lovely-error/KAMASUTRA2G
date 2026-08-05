@@ -1,4 +1,6 @@
-//! Writes `rtl/k2g_pkg.sv` from the opcode enums in `emu/src/insns.rs`.
+//! Writes the generated RTL and documentation: `rtl/k2g_pkg.sv` and
+//! `docs/isa-opcodes.md` from the opcode enums in `emu/src/insns.rs`, and
+//! `rtl/k2g_host_pkg.sv` from the wire protocol in `emu/src/hostproto.rs`.
 //!
 //! Usage (from the `emu/` directory):
 //!
@@ -53,6 +55,10 @@ fn main() -> ExitCode {
 	let outputs = [
 		(root.join(emu::sv_gen::OUTPUT_PATH), emu::sv_gen::emit_sv()),
 		(root.join(emu::sv_gen::DOC_OUTPUT_PATH), emu::sv_gen::emit_opcode_tables_md()),
+		// The host-control protocol has the same drift problem as the opcode
+		// map -- it is written down in Rust for `kctl` and in SystemVerilog for
+		// `k2g_mon` -- and takes the same answer.
+		(root.join(emu::hostproto::SV_OUTPUT_PATH), emu::hostproto::emit_host_pkg_sv()),
 	];
 
 	if check_only {
