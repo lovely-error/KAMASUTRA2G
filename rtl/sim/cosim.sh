@@ -34,6 +34,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # are not reachable from WSL and the resulting error is misleading.
 . "$HERE/shell_check.sh"
 k2g_require_windows_shell || exit 1
+k2g_require_no_questa || exit 1
 # ROOT comes from this script's own location, never from RTL: `mutants.sh`
 # points K2G_RTL at a throwaway copy of the sources, and the emulator, the
 # programs and the DPI object must still come from the real tree.
@@ -62,6 +63,19 @@ LATENCY="${LATENCY:-0}"
 # a mis-fetched stream on one side, the pending-load path on the other. A
 # single knob would let one hide the other's bugs.
 ILATENCY="${ILATENCY:-0}"
+
+# Random host pauses, injected into the core's `fetch_hold`. Zero never pauses.
+#
+# SAME ARGUMENT AS LATENCY, and it is the strongest evidence available that
+# host control is correct: nothing commits during a pause either, so a paused
+# run and an unpaused one must produce byte-for-byte identical results. The
+# stop lands mid prefix chain, with a load outstanding, between a widening
+# multiply's two cycles -- and none of that may be visible to the emulator.
+#
+# The rate is roughly one pause per 512/PAUSE cycles, held for up to 63. The
+# run reports how many actually fired, so a setting that never paused cannot
+# pass by looking like success.
+PAUSE="${PAUSE:-0}"
 
 # A space-separated subset of the shipped programs, for when a run is aimed at
 # one thing: rtl/sim/mutants.sh breaks a single guard and wants the one program
@@ -115,7 +129,7 @@ run_one() {
     local log="$WORK/cosim_${label}.log"
     "$QUESTA/vsim.exe" -c -quiet -sv_lib "$DPI" \
         -do "onerror {quit -code 1}; run -all; quit -f" \
-        "+image=$img" "+latency=$LATENCY" "+ilatency=$ILATENCY" \
+        "+image=$img" "+latency=$LATENCY" "+ilatency=$ILATENCY" "+pause=$PAUSE" \
         ${want:+"+expect_cause=$want"} tb_cosim > "$log" 2>&1
     if grep -q TB_PASS "$log"; then
         local n c
@@ -215,7 +229,7 @@ done
 
 echo
 if [ $fail -eq 0 ]; then
-    echo "COSIM PASS -- $total_checks architectural state comparisons, no divergence (data 0..$LATENCY, insn 0..$ILATENCY)"
+    echo "COSIM PASS -- $total_checks architectural state comparisons, no divergence (data 0..$LATENCY, insn 0..$ILATENCY, pause $PAUSE)"
 else
     echo "COSIM FAIL"
 fi

@@ -18,6 +18,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # are not reachable from WSL and the resulting error is misleading.
 . "$HERE/shell_check.sh"
 k2g_require_windows_shell || exit 1
+k2g_require_no_questa || exit 1
 # ROOT is derived from this script's own location, never from RTL: `mutants.sh`
 # points K2G_RTL at a throwaway copy of the sources, and the emulator, the
 # programs and the DPI object must still come from the real tree.
@@ -43,14 +44,17 @@ cd "$WORK" || exit 1
 rm -rf work
 "$VLIB" work > /dev/null || exit 1
 
-# Order matters: the generated opcode package first, then shared types.
+# Order matters: the generated packages first, then shared types. Both are
+# named here rather than left to the glob below, which happens to sort them
+# early today and would stop doing so the moment a module is renamed.
 SOURCES=(
     "$RTL/k2g_pkg.sv"
+    "$RTL/k2g_host_pkg.sv"
     "$RTL/k2g_types.svh"
 )
 for f in "$RTL"/k2g_*.sv; do
     case "$(basename "$f")" in
-        k2g_pkg.sv) ;;
+        k2g_pkg.sv|k2g_host_pkg.sv) ;;
         *) SOURCES+=("$f") ;;
     esac
 done
@@ -157,6 +161,26 @@ for t in "${tests[@]}"; do
                 fail=1
             fi
         done
+        continue
+    fi
+
+    # tb_soc loads a program over the serial link and runs it, so it needs an
+    # image and the text that program prints. `fib` rather than `hello`: the
+    # boot ROM already prints Hello, so a loaded program printing the same thing
+    # would pass whether or not it ever ran.
+    if [ "$t" = "tb_soc" ] && [ -f "$WORK/fib.bin" ]; then
+        "$VSIM" -c -quiet -do "onerror {quit -code 1}; run -all; quit -f"             "+image=$WORK/fib.bin" tb_soc > "$out" 2>&1
+        rc=$?
+        if grep -q "TB_PASS" "$out" && ! grep -qE '^# \*\* (Error|Fatal)' "$out" && [ $rc -eq 0 ]; then
+            n=$(grep -oE 'checks=[0-9]+' "$out" | tail -1 | cut -d= -f2)
+            printf '%-24s PASS  %s
+' "$t" "${n:+$n checks}"
+        else
+            printf '%-24s FAIL
+' "$t"
+            grep -E '^# \*\* (Error|Fatal)|TB_FAIL|Mismatch' "$out" | head -12
+            fail=1
+        fi
         continue
     fi
 

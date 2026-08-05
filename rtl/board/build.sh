@@ -4,12 +4,13 @@
 #   bash rtl/board/build.sh blink       # stage 1: LEDs only
 #   bash rtl/board/build.sh loopback    # stage 2: UART echo, no CPU
 #   bash rtl/board/build.sh psram       # stage 3: PLL, PSRAM controller, calibration
-#   bash rtl/board/build.sh soc         # stage 4: the whole machine
+#   bash rtl/board/build.sh mon         # stage 4: the host monitor over PSRAM, no CPU
+#   bash rtl/board/build.sh soc         # stage 5: the whole machine
 #
 # Staged deliberately. If the board misbehaves, the stage that fails says which
 # layer is at fault: blink means toolchain/pinout/clock, loopback means UART
-# pins or baud rate, psram means the memory or its PLL, soc means the CPU or
-# the memory image.
+# pins or baud rate, psram means the memory or its PLL, mon means the host
+# protocol or the bus behind it, soc means the CPU or the memory image.
 #
 # Flash with (openFPGALoader, or the Gowin programmer GUI):
 #   openFPGALoader -b tangnano9k rtl/board/out/<stage>/impl/pnr/project.fs
@@ -49,11 +50,30 @@ case "$STAGE" in
         SRC=("$HERE/k2g_pll.sv" "$HERE/k2g_psram_probe.sv"
              "$ROOT/K2606/src/psram_memory_interface_hs/psram_memory_interface_hs.v")
         ;;
+    mon)
+        # The host monitor over real PSRAM, with NO CORE. First stage in which
+        # framing, a baud rate, a clock crossing and 8 MB of memory are in the
+        # same design; put all of that straight into `soc` and a board that
+        # will not answer could be any of them, plus the CPU and the caches.
+        #
+        # Sources are named rather than globbed: this stage is deliberately a
+        # short list, and a module appearing in it by accident would defeat the
+        # point of building it separately.
+        TOP="k2g_mon_probe"
+        SRC=("$RTL/k2g_pkg.sv" "$RTL/k2g_host_pkg.sv" "$RTL/k2g_types.svh"
+             "$RTL/k2g_membus.sv" "$RTL/k2g_cdc_fifo.sv" "$RTL/k2g_psram.sv"
+             "$RTL/k2g_mon.sv"
+             "$HERE/k2g_uart.sv" "$HERE/k2g_pll.sv" "$HERE/k2g_mon_probe.sv"
+             "$ROOT/K2606/src/psram_memory_interface_hs/psram_memory_interface_hs.v")
+        ;;
     soc)
         TOP="k2g_soc"
-        SRC=("$RTL/k2g_pkg.sv" "$RTL/k2g_types.svh")
+        SRC=("$RTL/k2g_pkg.sv" "$RTL/k2g_host_pkg.sv" "$RTL/k2g_types.svh")
         for f in "$RTL"/k2g_*.sv; do
-            [ "$(basename "$f")" = "k2g_pkg.sv" ] || SRC+=("$f")
+            case "$(basename "$f")" in
+                k2g_pkg.sv|k2g_host_pkg.sv) ;;
+                *) SRC+=("$f") ;;
+            esac
         done
         # The PLL and the PSRAM controller come with the SoC now: memory is the
         # in-package PSRAM rather than BSRAM, so the same IP the `psram` stage
@@ -62,7 +82,7 @@ case "$STAGE" in
               "$HERE/k2g_soc.sv"
               "$ROOT/K2606/src/psram_memory_interface_hs/psram_memory_interface_hs.v")
         ;;
-    *) echo "unknown stage '$STAGE' (blink | loopback | psram | soc)" >&2; exit 1 ;;
+    *) echo "unknown stage '$STAGE' (blink | loopback | psram | mon | soc)" >&2; exit 1 ;;
 esac
 
 rm -rf "$WORK"; mkdir -p "$WORK"
@@ -107,24 +127,47 @@ cp "$HERE"/*.hex "$WORK/" 2>/dev/null || true
 } > "$WORK/build.tcl"
 
 echo "building '$STAGE' (top=$TOP) ..."
-( cd "$WORK" && "$GW_SH" build.tcl ) > "$WORK/build.log" 2>&1
-rc=$?
+# THROUGH A PIPE, NOT A FILE REDIRECT, and the difference is not cosmetic.
+# `> file 2>&1` captured NOTHING from gw_sh -- every failing build produced an
+# empty log, which is the "silent toolchain failure" docs/bring-up.md tells you
+# to bisect blindly. It is not silent: run it in a pipe and it says exactly what
+# is wrong. The overflow that this comment was written for reported
+#
+#   ERROR (RP0006) : The number(8645(...)) of logic in the design exceeds the
+#   resource limit(8640) of current device
+#
+# and cost an hour of bisection that reading it would have cost a minute.
+# PIPESTATUS, because `$?` after a pipe is `tee`'s.
+set -o pipefail
+( cd "$WORK" && "$GW_SH" build.tcl ) 2>&1 | tee "$WORK/build.log"
+rc=${PIPESTATUS[0]}
+set +o pipefail
 
-if grep -qiE '^ERROR|\bERROR \(' "$WORK/build.log"; then
+# THE BITSTREAM IS THE VERDICT, not gw_sh's exit code and not the log.
+#
+# Both of the obvious signals lie. `gw_sh` exits 1 on builds that produced a
+# perfectly good bitstream, so `rc` alone reports failures that did not happen.
+# And it writes its output to the console device rather than to stdout, so
+# `> file` captures nothing and `| tee` captures nothing either -- the log is
+# empty however this is redirected, which is the "silent toolchain failure"
+# docs/bring-up.md tells you to bisect blindly. It is only silent when captured:
+# run `gw_sh build.tcl` by hand in the work directory and it says exactly what
+# is wrong.
+#
+# So: a fresh bitstream means success, and its absence means failure. `rc` and
+# the log are reported as evidence when there is a failure to explain, never
+# used to declare one.
+FS="$WORK/impl/pnr/project.fs"
+if [ ! -f "$FS" ] || [ "$FS" -ot "$WORK/build.tcl" ]; then
+    echo "BUILD FAILED (gw_sh exit $rc)"
+    echo "No fresh bitstream. gw_sh's own output is not captured -- to see it:"
+    echo "    cd $WORK && \"\$GW_SH\" build.tcl"
+    grep -iE '^ERROR|\bERROR \(' "$WORK/build.log" 2>/dev/null | head -12
+    exit 1
+fi
+if grep -qiE '^ERROR|\bERROR \(' "$WORK/build.log" 2>/dev/null; then
     echo "BUILD FAILED"
     grep -iE '^ERROR|\bERROR \(' "$WORK/build.log" | head -12
-    exit 1
-fi
-if [ $rc -ne 0 ]; then
-    echo "BUILD FAILED: gw_sh exit $rc"
-    tail -20 "$WORK/build.log"
-    exit 1
-fi
-
-FS="$WORK/impl/pnr/project.fs"
-if [ ! -f "$FS" ]; then
-    echo "BUILD FAILED: no bitstream produced"
-    tail -20 "$WORK/build.log"
     exit 1
 fi
 

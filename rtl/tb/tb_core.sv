@@ -41,6 +41,13 @@ module tb_core
   logic        cmaint_req;
   wire  logic  cmaint_done = cmaint_req;
 
+  // Host control, tied off. This testbench runs programs to completion; the
+  // pause mechanism is exercised in `tb_cosim`, where a random one has to
+  // produce byte-identical results, and in `tb_soc`, where a real frame drives
+  // it through the monitor.
+  logic        fetch_hold = 1'b0;
+  logic        idle;
+
   int unsigned latency  = 0;
   int unsigned ilatency = 0;
 

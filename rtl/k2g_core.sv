@@ -63,6 +63,29 @@ module k2g_core
     output logic        retire_valid,
     output retire_t     retire,
 
+    // ---- host control ------------------------------------------------------
+    //
+    // Two ports, no new architectural state, and nothing a program can observe.
+    //
+    // `fetch_hold` stops the front end ISSUING FETCHES and nothing else. The
+    // pipeline then drains on its own: code points already in the F->D buffer
+    // decode, instructions in flight execute and retire, outstanding responses
+    // come back, and the machine coasts to a stop. Nothing is frozen part-way,
+    // so there is no partial commit to reason about -- which is why a pause is
+    // architecturally invisible and `PAUSE=1 bash rtl/sim/cosim.sh` must give
+    // results identical to an unpaused run.
+    //
+    // Gating `take_uop` instead would be the obvious thing and is wrong: it
+    // strands an in-flight load in M with nothing to retire it, and `idle`
+    // would never arrive.
+    //
+    // This stops at a CODE POINT boundary, not an instruction boundary -- a
+    // partial prefix chain may sit in `k2g_decode`'s accumulator across a
+    // pause. Harmless for reading memory and for resuming; a host that has
+    // rewritten the program resets before resuming.
+    input  logic        fetch_hold,
+    output logic        idle,
+
     // Machine status, for the LEDs and the halt-time dump.
     output logic        halted,
     output logic        faulted,
@@ -188,7 +211,12 @@ module k2g_core
   //
   // The data port needs no such guard -- `mem_access` requires `uop_valid`,
   // which comes from the D->X register and is reset with everything else.
-  assign ibus.req_valid = rst_n && !halted_r && (inflight < 3'(F2D_DEPTH));
+  // `fetch_hold` joins the same guard, which is the whole of the host pause on
+  // this side. It is a register output of `k2g_mon`, so it arrives early; that
+  // it lands on this expression at all is worth watching, because this is one
+  // of the two paths docs/v2-plan.md's 2e measurement names as setting Fmax.
+  assign ibus.req_valid = rst_n && !halted_r && !fetch_hold &&
+                          (inflight < 3'(F2D_DEPTH));
   assign ibus.req.addr  = pc;
   assign ibus.req.we    = 4'b0000;
   assign ibus.req.wdata = 32'd0;
@@ -1108,6 +1136,55 @@ module k2g_core
       retire       <= w_retire;
     end
   end
+
+  // ---- quiescence --------------------------------------------------------
+  //
+  // Nothing left anywhere: no fetch response owed, the F->D buffer empty, X, M
+  // and W empty, no widening multiply in its second cycle, no CSP access
+  // waiting on the transmitter, no cache maintenance outstanding. `retire_valid`
+  // is in here as well as `w_active` because retirement trails the commit by a
+  // cycle, and a host that took the memory bus on the strength of `w_active`
+  // alone would take it one cycle before the last write had landed.
+  //
+  // Asserted whenever it is true, not only under `fetch_hold`. A core that has
+  // executed HALT or faulted stops fetching on its own and drains to exactly
+  // this state, which is what lets `PAUSE` on a stopped machine answer at once
+  // instead of waiting for something that will never happen.
+  //
+  // A partial prefix chain in `k2g_decode`'s accumulator does NOT hold this
+  // low: it produces no uop and consumes nothing further, so the machine is
+  // genuinely quiet. See the `fetch_hold` note in the port list.
+  //
+  // THE FRONT END IS EXCUSED ON A HALTED MACHINE, and that is not a shortcut.
+  // Both halves of it stop where they are and nothing will ever consume them:
+  //
+  //   * `f2d.ready` is gated on `!halted_r`, so code points fetched ahead of
+  //     the stopping instruction sit in the buffer for ever;
+  //   * `take_uop` is gated the same way -- and `d_emit` is not, so the
+  //     instruction AFTER the halting one is loaded into X in the very cycle
+  //     `halted_r` rises and stays there. It can never execute.
+  //
+  // Nothing in flight is excused: the bus counters, M, the widening multiply,
+  // the CSP wait and W all still have to be clear, and those are what a host
+  // taking the memory bus actually depends on.
+  //
+  // `retire_valid` CARRIES NO MUTANT, deliberately. It is the last cycle of a
+  // commit and it is here for correctness, but removing it cannot be observed:
+  // the host does not take the bus when `idle` rises, it starts a cache flush,
+  // and that walks 64 lines before ownership moves. The one cycle this term
+  // covers is masked by hundreds. A mutant for it reported MISSED, and a test
+  // that cannot fail is worse than no test -- the same reasoning as the
+  // unreachable flag-forwarding muxes further up.
+  //
+  // Without this, PAUSE on a halted or faulted core never completes -- which is
+  // precisely the state a host most wants to look at. Both terms were found by
+  // `tb_soc`, one after the other, by pausing a machine that had run `hello` to
+  // its HALT. Neither was found by reasoning about it beforehand.
+  wire logic front_quiet = halted_r || (!f2d.valid && !uop_valid);
+
+  assign idle = (outstanding == 3'd0) && front_quiet && !m_valid &&
+                !mulw_pending && !csp_stall && !cmaint_pending &&
+                !w_active && !retire_valid;
 
   // ---- sequential state --------------------------------------------------
   assign halted        = halted_r;

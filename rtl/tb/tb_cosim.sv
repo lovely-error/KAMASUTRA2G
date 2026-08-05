@@ -96,6 +96,47 @@ module tb_cosim
   logic        iinval_req, iinval_busy;
   logic        cm_dflush_req;
 
+  // ---- random pause injection, from +pause=N -----------------------------
+  //
+  // THIS IS THE TEST THAT MATTERS FOR HOST CONTROL, and it is the same
+  // argument as `+latency`: nothing commits during a pause, so a paused run
+  // and an unpaused one must produce BYTE-IDENTICAL results. Any divergence
+  // means the core is reading state it does not own.
+  //
+  // `fetch_hold` stops the front end and the pipeline drains on its own, so
+  // holding it for a random stretch at a random moment lands the stop in every
+  // part of every instruction -- mid prefix chain, with a load outstanding,
+  // between a widening multiply's two cycles. None of those may be visible.
+  //
+  // N is the rate: roughly one pause every 512/N cycles, held for up to 63.
+  // Drawn from an LFSR so a failure is reproducible from the seed.
+  int unsigned pause_rate = 0;
+
+  logic        fetch_hold;
+  logic        idle;
+  logic [15:0] pause_lfsr = 16'hACE1;
+  logic [5:0]  pause_left = 6'd0;
+  int          pause_count = 0;
+
+  assign fetch_hold = (pause_left != 6'd0);
+
+  always_ff @(posedge clk) begin
+    if (!rst_n) begin
+      pause_left <= 6'd0;
+    end else begin
+      pause_lfsr <= {pause_lfsr[14:0],
+                     pause_lfsr[15] ^ pause_lfsr[13] ^ pause_lfsr[12] ^
+                     pause_lfsr[10]};
+      if (pause_left != 6'd0) begin
+        pause_left <= pause_left - 6'd1;
+      end else if (pause_rate != 0 &&
+                   (pause_lfsr[8:0] < 9'(pause_rate))) begin
+        pause_left  <= pause_lfsr[13:8] | 6'd1;
+        pause_count <= pause_count + 1;
+      end
+    end
+  end
+
   k2g_membus dbus ();
   k2g_membus ibus ();
 
@@ -186,11 +227,15 @@ module tb_cosim
   // ICINVR, sequenced exactly as the SoC does it: clean the data cache, then
   // drop the instruction cache. `dflush_req` above is the testbench's own
   // end-of-run flush, which shares the same port.
+  // The monitor's request port is unused here -- there is no monitor in this
+  // testbench, only the core -- so it is tied off rather than left floating.
   k2g_cache_maint u_cmaint (
       .clk        (clk),
       .rst_n      (rst_n),
-      .req        (cmaint_req),
-      .done       (cmaint_done),
+      .req_a      (cmaint_req),
+      .done_a     (cmaint_done),
+      .req_b      (1'b0),
+      .done_b     (),
       .dflush_req (cm_dflush_req),
       .dflush_busy(dflush_busy),
       .iinval_req (iinval_req),
@@ -399,6 +444,7 @@ module tb_cosim
     void'($value$plusargs("expect_cause=%s", expect_cause));
     void'($value$plusargs("latency=%d", latency));
     void'($value$plusargs("ilatency=%d", ilatency));
+    void'($value$plusargs("pause=%d", pause_rate));
     forever_ok = $test$plusargs("forever");
 
     load_both(image_path);
@@ -594,6 +640,12 @@ module tb_cosim
         end
       end
     end
+
+    // Reported so a run with `+pause=` cannot pass by never having paused --
+    // which is what a rate the LFSR's low bits happen never to reach would
+    // look like, and it would look exactly like success.
+    if (pause_rate != 0)
+      $display("pauses=%0d", pause_count);
 
     $display("retired=%0d checks=%0d errors=%0d", retired, checks, errors);
     if (errors == 0) $display("TB_PASS tb_cosim");

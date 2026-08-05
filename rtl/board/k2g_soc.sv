@@ -169,7 +169,17 @@ module k2g_soc
   localparam int ROM_BYTES     = `K2G_ROM_BYTES;
   localparam int ROM_ADDR_BITS = `K2G_ROM_ADDR_BITS;
 
+  // THE ROM READ IS SYNCHRONOUS, because that is what puts the program in a
+  // BSRAM block instead of 128 logic cells -- measured both ways, see
+  // `mkrom.rs`. With the host monitor in, this design places at 99% and did not
+  // fit at all with the ROM in logic.
+  //
+  // So the address presented is the one the copier will want NEXT, not the one
+  // it is using now: `boot_data` lags `boot_addr` by a cycle, and the copier
+  // needs the byte in the same cycle it offers the write. Held at 0 through
+  // reset, so the first byte is ready when `booting` starts.
   k2g_rom u_rom (
+      .clk (clk_sys),
       .addr(boot_addr[ROM_ADDR_BITS-1:0]),
       .data(boot_data)
   );
@@ -210,16 +220,38 @@ module k2g_soc
     end
   end
 
-  assign boot_addr = boot_ix;
+  // One ahead of `boot_ix`, exactly when `boot_ix` is about to advance. See the
+  // note at `u_rom`.
+  //
+  // `sys_rst_n` IS IN HERE. `booting` resets to 1, so without it the lookahead
+  // is live during reset, and one cycle of `req_ready` there latches byte 1
+  // into the ROM's output register before byte 0 has been written. The copy
+  // then runs one byte out of step from the very start -- caught by `tb_soc`,
+  // which reported byte 0 holding 0xF1 where the ROM says 0x40, and every other
+  // byte correct.
+  assign boot_addr = boot_ix +
+                     ((sys_rst_n && booting && cbus.req_ready) ? 16'd1 : 16'd0);
+
+  // ---- host control ------------------------------------------------------
+  // Declared before the reset below, which needs one of them.
+  logic mon_core_rst, mon_bus_own, mon_fetch_hold, core_idle;
 
   // The CPU stays in reset for the whole copy, so it never sees a partly
   // written program -- and the last write does not have to have completed
   // before it starts, because the adapter's sequencer is in order: a fetch
   // issued after the write was accepted cannot overtake it.
-  wire logic cpu_rst_n = sys_rst_n && !booting;
+  //
+  // `mon_core_rst` is the host's RESET command. It is deliberately NOT part of
+  // `sys_rst_n`, so it does not re-run the boot copier: a program the host has
+  // just written over the top of the ROM image has to survive being started.
+  // It does reset both caches, which are held by this signal, and that is what
+  // makes "write a program, then run it" work with no cache-specific command in
+  // the protocol.
+  wire logic cpu_rst_n = sys_rst_n && !booting && !mon_core_rst;
 
   // ---- memory ------------------------------------------------------------
-  logic cmaint_req, cmaint_done;
+  logic cmaint_req, cmaint_done;          // the core's ICINVR
+  logic mon_cmaint_req, mon_cmaint_done;  // the host entering a pause
   logic dflush_req, dflush_busy;
   logic iinval_req, iinval_busy;
 
@@ -244,10 +276,34 @@ module k2g_soc
       .flush_busy(dflush_busy)
   );
 
+  // Two levels of ownership, and both obey the same rule: `sel` may only move
+  // with nothing in flight (k2g_membus_mux.sv).
+  //
+  //   u_monmux  core or host        -- the host takes it only after the core has
+  //                                    gone idle AND the cache flush that
+  //                                    follows has finished, so neither side has
+  //                                    a response owed;
+  //   u_dmux    copier or the above -- as before: the core is held in reset for
+  //                                    the whole boot copy.
+  //
+  // The monitor is live during the boot copy and cannot reach memory until it
+  // ends, because `u_dmux` is still routing the copier. A host command arriving
+  // in that window waits on `req_ready`; the copy is about 100 us and nothing
+  // else is needed to make that safe.
+  k2g_membus mbus_mon ();     // the host monitor
+  k2g_membus dbus_run ();     // core or host, whichever owns memory
+
+  k2g_membus_mux u_monmux (
+      .sel (mon_bus_own),
+      .up_a(dbus_mem),
+      .up_b(mbus_mon),
+      .down(dbus_run)
+  );
+
   k2g_membus_mux u_dmux (
       .sel (!booting),
       .up_a(cbus),
-      .up_b(dbus_mem),
+      .up_b(dbus_run),
       .down(mbus)
   );
 
@@ -370,9 +426,13 @@ module k2g_soc
   logic [31:0] fault_addr_o, fault_info_o;
   logic [63:0] cycle_count_o;
 
-  logic       rx_valid, rx_have;
-  logic [7:0] rx_data, rx_byte;
-  logic       tx_ready;
+  // Between the UART modules and the monitor.
+  logic       rx_valid, tx_valid, tx_ready;
+  logic [7:0] rx_data, tx_data;
+
+  // Between the monitor and the core's CSP port -- the program's own console.
+  logic       rx_have, con_tx_ready;
+  logic [7:0] rx_byte;
 
   k2g_core #(.MEM_BYTES(MEM_BYTES)) u_core (
       .clk          (clk_sys),
@@ -381,7 +441,7 @@ module k2g_soc
       .dbus         (dbus),
       .uart_tx_valid(core_tx_valid),
       .uart_tx_data (core_tx_data),
-      .uart_tx_ready(tx_ready),
+      .uart_tx_ready(con_tx_ready),
       .uart_rx_valid(rx_have),
       .uart_rx_data (rx_byte),
       .uart_rx_take (core_rx_take),
@@ -397,7 +457,11 @@ module k2g_soc
       .fault_info_o (fault_info_o),
       .cycle_count_o(cycle_count_o),
       .cmaint_req   (cmaint_req),
-      .cmaint_done  (cmaint_done)
+      .cmaint_done  (cmaint_done),
+      // Host control. `fetch_hold` stops the front end; `idle` says the machine
+      // has drained. Nothing architectural is in either.
+      .fetch_hold   (mon_fetch_hold),
+      .idle         (core_idle)
   );
 
   // ---- ICINVR ------------------------------------------------------------
@@ -405,11 +469,16 @@ module k2g_soc
   // what that costs here. Order matters and is enforced inside: clean the data
   // cache first, because the instructions just written are sitting dirty in
   // it, and only then drop the instruction cache.
+  // The host asks for the same thing when it pauses, and for a related reason:
+  // the bytes a program has stored are sitting dirty in the data cache, so
+  // memory does not yet hold what the host is about to read.
   k2g_cache_maint u_cmaint (
       .clk        (clk_sys),
       .rst_n      (cpu_rst_n),
-      .req        (cmaint_req),
-      .done       (cmaint_done),
+      .req_a      (cmaint_req),
+      .done_a     (cmaint_done),
+      .req_b      (mon_cmaint_req),
+      .done_b     (mon_cmaint_done),
       .dflush_req (dflush_req),
       .dflush_busy(dflush_busy),
       .iinval_req (iinval_req),
@@ -417,15 +486,21 @@ module k2g_soc
   );
 
   // ---- UART --------------------------------------------------------------
-  // Straight ready/valid to the transmitter. The one-byte holding register
-  // that used to sit here was the bug: the core does not wait, so each new
-  // byte overwrote the one being shifted out. The core now stalls instead,
-  // which costs nothing architecturally.
+  // THE MONITOR OWNS THE LINK NOW, in both directions. Every byte on the wire
+  // is inside a frame, so the program's console output and the host's commands
+  // can share one pair of pins without either being able to imitate the other.
+  // docs/host-control.md is the protocol; `kctl console` is what shows the
+  // console, because a plain terminal no longer can.
+  //
+  // Both UART modules run on `sys_rst_n` rather than `cpu_rst_n`, as they always
+  // have, and that is what makes host control work at all: the link has to
+  // survive the core being held in reset, which is exactly when the host is
+  // most likely to be talking to it.
   k2g_uart_tx #(.DIVISOR(DIVISOR)) u_tx (
       .clk  (clk_sys),
       .rst_n(sys_rst_n),
-      .valid(core_tx_valid),
-      .data (core_tx_data),
+      .valid(tx_valid),
+      .data (tx_data),
       .ready(tx_ready),
       .tx   (uart_tx)
   );
@@ -438,18 +513,82 @@ module k2g_soc
       .data (rx_data)
   );
 
-  // One byte of receive buffering, consumed when the core reads the port.
-  always_ff @(posedge clk_sys) begin
-    if (!sys_rst_n) begin
-      rx_have <= 1'b0;
-      rx_byte <= 8'd0;
-    end else if (rx_valid) begin
-      rx_byte <= rx_data;
-      rx_have <= 1'b1;
-    end else if (core_rx_take) begin
-      rx_have <= 1'b0;
-    end
-  end
+  // The one byte of receive buffering that used to sit here is inside the
+  // monitor now, alongside the transmit buffer that turns the core's stream of
+  // characters into frames. `con_tx_ready` is what the core's CSP port sees as
+  // `uart_tx_ready`: "the buffer has room" rather than "the transmitter is
+  // idle", which preserves the stall that stopped `hello` printing `H` and
+  // nothing else on the first hardware run (docs/bring-up.md).
+  // CONSOLE_TX_DEPTH IS 8 HERE, AND IT IS LOAD-BEARING FOR A REASON THAT IS NOT
+  // THE OBVIOUS ONE. Halving it saves about five cells of its own -- measured on
+  // the `mon` stage. What it actually buys is 290: at depth 16 this design packs
+  // tightly enough that GowinSynthesis will not map the boot ROM into a BSRAM
+  // block, and the ROM stays as 128 logic cells plus whatever the congestion
+  // costs around it. At depth 8 the ROM lands in BSRAM (15 blocks -> 16) and the
+  // design drops from over the limit to 8334 of 8640.
+  //
+  // That took a long time to find, and the wrong theories are worth recording
+  // so they are not tried again: it is not `syn_hier` (8334 cells with and
+  // without), not the combinational address expression, and not the `default`
+  // arm over unused addresses. Synthesized alone the ROM infers a pROM under
+  // every one of those conditions. It is packing pressure, and every experiment
+  // that said otherwise was measuring a build too full to accept the mapping.
+  //
+  // The cost is framing overhead on console output -- seven bytes per eight
+  // rather than per sixteen, so a printing program runs at about three quarters
+  // the rate. Do not raise it back to 16 expecting to spend five cells.
+  // HAS_CONSOLE_IN is clear, and the number is not the one you would guess.
+  // Removing the receive path saves 33 cells measured on the `mon` stage -- but
+  // putting it back here cost 194 and returned this design to 99%, because at
+  // this utilization a change of any size perturbs packing and the boot ROM is
+  // the first thing to fall out of BSRAM. 8334 without it, 8528 with.
+  //
+  // So the host cannot type into a running program on this build. Nothing in
+  // `emu/programs/` reads the UART; `IDENT` reports the capability absent, so
+  // `kctl ping` says so rather than a CONSOLE_IN timing out; the `mon` stage
+  // keeps it and `tb_mon` still tests it.
+  k2g_mon #(
+      .MEM_BYTES        (MEM_BYTES),
+      .HAS_CONSOLE_IN   (1'b0),
+      .CONSOLE_TX_DEPTH (8)
+  ) u_mon (
+      .clk   (clk_sys),
+      .rst_n (sys_rst_n),
+
+      .rx_valid(rx_valid), .rx_data(rx_data),
+      .tx_valid(tx_valid), .tx_data(tx_data), .tx_ready(tx_ready),
+
+      .bus(mbus_mon),
+
+      .fetch_hold      (mon_fetch_hold),
+      .core_idle       (core_idle),
+      .core_halted     (halted),
+      .core_faulted    (faulted),
+      .core_fault_cause(fault_cause_o),
+      .core_fault_addr (fault_addr_o),
+      .core_fault_info (fault_info_o),
+      .core_cycles     (cycle_count_o),
+      .core_rst        (mon_core_rst),
+      .bus_own         (mon_bus_own),
+
+      // ANSWERED IMMEDIATELY WHILE THE CORE IS HELD, and that is not a
+      // shortcut either. `u_cmaint` and both caches are on `cpu_rst_n`, so
+      // during the boot copy -- or a host RESET -- there is nothing to answer
+      // a maintenance request and a PAUSE arriving in that window would wait
+      // for ever. There is also nothing to do: the caches are in reset, hold
+      // no dirty line and are already invalid. The boot window is only about
+      // 100 us, but it is exactly when a host that has just been plugged in
+      // starts talking.
+      .cmaint_req (mon_cmaint_req),
+      .cmaint_done(mon_cmaint_done || !cpu_rst_n),
+
+      .con_tx_valid(core_tx_valid),
+      .con_tx_data (core_tx_data),
+      .con_tx_ready(con_tx_ready),
+      .con_rx_valid(rx_have),
+      .con_rx_data (rx_byte),
+      .con_rx_take (core_rx_take)
+  );
 
   // ---- status ------------------------------------------------------------
   // While running: a heartbeat plus whatever the program put in GPIO.
@@ -476,6 +615,11 @@ module k2g_soc
       status = {1'b1, fault_cause_o};         // top bit marks a fault
     end else if (halted) begin
       status = {1'b0, 5'b10000};              // clean halt
+    end else if (mon_bus_own) begin
+      // Stopped by the host, which owns memory. Distinguishable from a halt
+      // because a board sitting here is waiting for a command rather than
+      // finished, and the two look identical from across a desk.
+      status = {heartbeat[23], 5'b01000};
     end else begin
       status = {heartbeat[23], gpio_out[4:0]};
     end

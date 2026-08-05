@@ -36,6 +36,7 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/shell_check.sh"
 k2g_require_windows_shell || exit 1
+k2g_require_no_questa || exit 1
 
 ROOT="$(cd "$HERE/../.." && pwd)"
 RTL="$(cd "$HERE/.." && pwd)"
@@ -50,6 +51,26 @@ FILTER="${1:-}"
 #
 # `expectation` is `detect` (the run must fail) or `survive` (the run must
 # still pass -- used where the point is that ANOTHER configuration catches it).
+
+# ---- one entry that used to be here, and why it is not ----
+#
+# `load-assumes-one-cycle-at-zero-latency` was the `survive` half of a pair: the
+# same defect that `load-assumes-one-cycle-under-latency` catches, run WITHOUT
+# latency injection, where it was supposed to pass. That pair was the argument
+# for latency injection existing at all -- one mutant, invisible at LATENCY=0
+# and fatal at LATENCY=40.
+#
+# It no longer survives anywhere, and the reason is Phase 2e. `e755d61` put the
+# bus request behind a register, so an access occupies M for at least two cycles
+# even against memory that answers immediately; a mutant that assumes one cycle
+# is now wrong in every configuration this design has. Measured: UNEXPECTEDLY
+# CAUGHT at `cosim0`, and again with the caches taken out at `cosim0nc`.
+#
+# Latency injection is not thereby less valuable -- it is how the whole
+# variable-latency contract was proved, and `load-assumes-one-cycle-under-
+# latency` still earns its place. What is gone is this particular demonstration
+# of it, and a `survive` entry that cannot survive is a failing test rather than
+# an argument.
 
 read -r -d '' MUTANTS <<'EOF'
 rule-3-ready-path
@@ -76,18 +97,10 @@ detect
 tb_chan
 run
 --
-load-assumes-one-cycle-at-zero-latency
-k2g_core.sv
-      if (load_done) mem_pending <= 1'b0;
-      mem_pending <= 1'b0;
-survive
--
-cosim0
---
 load-assumes-one-cycle-under-latency
 k2g_core.sv
-      if (load_done) mem_pending <= 1'b0;
-      mem_pending <= 1'b0;
+        if (m_store_done || m_load_done)      m_valid  <= 1'b0;
+        m_valid  <= 1'b0;
 detect
 -
 cosim40nc
@@ -102,7 +115,7 @@ icosim
 --
 csp-side-effect-while-held
 k2g_core.sv
-                            !mem_pending && !mulw_pending &&
+                            !m_valid && !mulw_pending &&
                             1'b1 &&
 detect
 -
@@ -150,16 +163,16 @@ cosim1
 --
 core-f32-store-reaches-memory
 k2g_core.sv
-                          !misaligned && !out_of_range && !halted_r && !f32_any &&
-                          !misaligned && !out_of_range && !halted_r &&
+                         !misaligned && !out_of_range && !halted_r && !f32_any &&
+                         !misaligned && !out_of_range && !halted_r &&
 detect
 f32_store
 cosim1
 --
 core-store-never-written
 k2g_core.sv
-  assign dbus.req.we    = is_store ? store_we : 4'b0000;
-  assign dbus.req.we    = 4'b0000;
+        m_we      <= is_store ? store_we : 4'b0000;
+        m_we      <= 4'b0000;
 detect
 hazard
 cosim1
@@ -414,8 +427,8 @@ cosim1
 --
 icinvr-skips-the-dcache-clean
 k2g_cache_maint.sv
-        S_IDLE:    if (req)            state <= S_D_START;
-        S_IDLE:    if (req)            state <= S_I_START;
+          state <= S_D_START;
+          state <= S_I_START;
 detect
 selfmod
 cosim1
@@ -443,6 +456,86 @@ k2g_membus_mux.sv
 detect
 tb_soc
 run
+--
+mon-accepts-a-bad-crc
+k2g_mon.sv
+            if ({rx_data, rx_crc_lo} == rx_crc && cmd_st == C_IDLE) begin
+            if (cmd_st == C_IDLE) begin
+detect
+tb_mon
+run
+--
+mon-length-bound-removed
+k2g_mon.sv
+            if ({rx_data, rx_len_lo} > 16'(MAX_PAYLOAD)) begin
+            if (1'b0) begin
+detect
+tb_mon
+run
+--
+mon-write-lane-mask-fixed
+k2g_mon.sv
+  assign bus.req.we    = wr_pend ? (4'b0001 << wr_addr[1:0]) : 4'b0000;
+  assign bus.req.we    = wr_pend ? 4'b0001 : 4'b0000;
+detect
+tb_mon
+run
+--
+mon-does-not-wait-for-the-core
+k2g_mon.sv
+        C_PAUSE_WAIT: if (core_idle) begin
+        C_PAUSE_WAIT: if (1'b1) begin
+detect
+tb_mon
+run
+--
+mon-takes-the-bus-before-maintenance
+k2g_mon.sv
+        C_PAUSE_CM: if (!HAS_RUN_CONTROL || cmaint_done) begin
+        C_PAUSE_CM: if (1'b1) begin
+detect
+tb_mon
+run
+--
+mon-sends-a-read-byte-before-memory-answers
+k2g_mon.sv
+  wire logic tx_pay_ok = (tx_src != SRC_READ) || rd_word_valid;
+  wire logic tx_pay_ok = 1'b1;
+detect
+tb_mon
+run
+--
+mon-console-buffer-never-full
+k2g_mon.sv
+  assign con_tx_ready = HAS_CONSOLE && !ctx_full;
+  assign con_tx_ready = HAS_CONSOLE;
+detect
+tb_mon
+run
+--
+mon-resume-keeps-the-bus
+k2g_mon.sv
+                    bus_own    <= 1'b0;
+                    bus_own    <= 1'b1;
+detect
+tb_soc
+run
+--
+mon-reset-does-not-reset-the-core
+k2g_mon.sv
+                    core_rst <= 1'b1;
+                    core_rst <= 1'b0;
+detect
+tb_soc
+run
+--
+pause-abandons-the-fetch-stream
+k2g_core.sv
+      if (redirect) begin
+      if (redirect || fetch_hold) begin
+detect
+hello
+cosimpause
 EOF
 
 # ---- runner ------------------------------------------------------------
@@ -507,6 +600,11 @@ reset_scratch() {
     cp "$RTL"/board/*.sv "$RTL"/board/*.svh "$SCRATCH/rtl/board/" 2>/dev/null
 }
 
+# This script serializes its own runs through wait_for_questa_exit, so the
+# nodelocked-licence guard in shell_check.sh must not fire on the nested
+# run.sh and cosim.sh calls below.
+export K2G_ALLOW_CONCURRENT=1
+
 run_case() {
     local runner="$1" tb="$2" log="$3"
     case "$runner" in
@@ -518,11 +616,23 @@ run_case() {
         # slow response and its variable-latency machinery is not exercised at
         # all. These two mutants went MISSED the day the data cache landed.
         cosim40nc) K2G_RTL="$SCRATCH/rtl" NOCACHE=1 LATENCY=40 bash "$HERE/cosim.sh" 1 > "$log" 2>&1 ;;
+        # The `survive` half of the latency pair, and it needs the caches out as
+        # well as the latency at zero. WITH a cache in the path there is no
+        # zero-latency configuration any more -- a miss costs tens of cycles
+        # whatever LATENCY says -- so the mutant this is supposed to hide from
+        # is caught anyway and the pair stops making its point. It reported
+        # UNEXPECTEDLY CAUGHT against `cosim0` for exactly that reason.
+        cosim0nc)  K2G_RTL="$SCRATCH/rtl" NOCACHE=1 LATENCY=0  bash "$HERE/cosim.sh" 1 > "$log" 2>&1 ;;
         icosim)  K2G_RTL="$SCRATCH/rtl" ILATENCY=25 bash "$HERE/cosim.sh" 1 > "$log" 2>&1 ;;
         # One program rather than the whole sweep: the fault guards each have a
         # program written for them, and a full cosim run is 90 seconds against
         # this one's 11. `tb` names the program.
         cosim1)  K2G_RTL="$SCRATCH/rtl" PROGRAMS="$tb" bash "$HERE/cosim.sh" 0 > "$log" 2>&1 ;;
+        # WITH RANDOM HOST PAUSES. A pause commits nothing, so a correct one is
+        # invisible and PAUSE=0 cannot distinguish it from a broken one -- the
+        # same shape as the latency runners above. This is the only runner that
+        # exercises `fetch_hold` against the emulator at all.
+        cosimpause) K2G_RTL="$SCRATCH/rtl" PAUSE=64 PROGRAMS="$tb" bash "$HERE/cosim.sh" 0 > "$log" 2>&1 ;;
     esac
 }
 
