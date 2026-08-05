@@ -783,6 +783,179 @@ can use. `docs/bring-up.md` records the PLL divider values the toolchain silentl
 
 ---
 
+---
+
+## Phase 5 — host control over the UART ✅ done
+
+**Goal:** load a program over the serial link, start it, stop it, and read and
+write memory while it is stopped. No ISA change and no new architectural state.
+
+Until this existed, putting a program on the board meant regenerating the boot
+ROM and rebuilding the bitstream — one program per synthesis, several minutes
+each — and a program that misbehaved could only be diagnosed from six LEDs,
+because a halted core cannot execute the CSP read that would report its own
+fault cause. `docs/bring-up.md` called the LEDs "the debugger".
+
+### Decisions
+
+- **Every byte on the wire is framed.** Console output is a frame type of its
+  own, so the program's output and the host's commands share one pair of pins
+  without either being able to imitate the other. The cost is that a plain
+  terminal no longer shows the console; `kctl console` does.
+- **Power-on is unchanged.** The copier still lays the `mkrom` program into
+  PSRAM and the core still runs it with no host attached.
+- **`kctl` is a Rust binary in `emu/` with a hand-rolled serial layer** —
+  `CreateFileW`/`SetCommState` on Windows, termios on Linux. The crate still has
+  zero dependencies, which matters because it is also loaded into Questa as a
+  DPI object.
+- **Scope is those four things.** No single-step, no register dump, no
+  breakpoints. Area is why, and the area turned out to be the whole story.
+
+### The pause contract: two ports on the core, and nothing else
+
+```systemverilog
+input  logic fetch_hold,   // stop issuing instruction fetches
+output logic idle          // nothing in flight anywhere
+```
+
+`fetch_hold` joins the guard on `ibus.req_valid` and the pipeline **drains** on
+its own: buffered code points decode, instructions in flight execute and retire,
+outstanding responses come back. Nothing is frozen part-way, so there is no
+partial commit to reason about. Gating `take_uop` instead is the obvious thing
+and is wrong — it strands an in-flight load in M with nothing to retire it, and
+`idle` never arrives.
+
+It stops at a **code point** boundary, not an instruction boundary: a partial
+prefix chain may sit in `k2g_decode`'s accumulator across a pause. Harmless for
+reading memory and for resuming; a host that has rewritten the program resets
+first, which is what `kctl run` does.
+
+**`idle` excuses the front end on a halted machine, and that took two goes.**
+`f2d.ready` is gated on `!halted_r`, so code points fetched ahead of the stopping
+instruction sit in the buffer for ever; and `take_uop` is gated the same way
+while `d_emit` is not, so the instruction *after* the halting one is loaded into
+X in the very cycle `halted_r` rises and can never execute. Either one alone
+makes `PAUSE` on a halted core hang — which is exactly the state a host most
+wants to look at. Both were found by `tb_soc` pausing a machine that had run
+`hello` to its HALT, one after the other. Neither was found by reasoning about it
+first.
+
+### Where the monitor's bus attaches
+
+Downstream of both caches, beside the boot copier, through a second
+`k2g_membus_mux` (reused unmodified). Coherency comes from emptying the caches at
+pause entry rather than from routing around them:
+
+1. assert `fetch_hold`, wait for `idle`;
+2. raise the maintenance request — `k2g_cache_maint` cleans the write-back data
+   cache and then invalidates the instruction cache, the same sequence `ICINVR`
+   uses, and it grew a second request port for this;
+3. **only then** take the bus. Step 3 must follow step 2 because the flush issues
+   its writeback bursts through the same bus, and `k2g_membus_mux` requires that
+   ownership move only with nothing in flight.
+
+`mon_core_rst` is deliberately not part of `sys_rst_n`, so a host RESET does not
+re-run the boot copier — a program the host has just written has to survive being
+started. It does reset both caches, which is what makes "write a program, then
+run it" need no cache-specific command in the protocol.
+
+### The deadlock that isn't one
+
+A `PAUSE` waits for the core to go quiet. The core is fifty times faster than the
+line, so a printing program spends most of its time stalled on a full console
+buffer. If the monitor stopped emitting console frames while it waited, that
+program would never drain, never go idle, and the pause would never complete.
+
+So console frames keep flowing for as long as the command engine is waiting. A
+reply takes the transmitter only once the command is ready to answer, which for
+`PAUSE` is after the machine is already quiet — at which point the core cannot
+produce another console byte. The two never contend.
+
+### Area was the whole story
+
+The plan predicted 250–400 cells and said to measure before integrating.
+Measured:
+
+| | logic cells |
+|---|---:|
+| SoC without the monitor | 7613 / 8640 |
+| SoC with it | **8519 / 8640 (99%)** |
+| the monitor's share | **906** |
+
+Getting there took three reductions, and the first attempt did not build at all:
+
+| | result |
+|---|---|
+| as first written | **8645** — synthesis refused, over by five cells |
+| CRC serialized, one bit per cycle | placement failed, 75 LUTs unplaced |
+| reply payload restructured, buffers and `MAX_PAYLOAD` halved | **8519, fits** |
+
+- **The CRC had eight call sites** — four receive states and four transmit — and
+  synthesis builds one unrolled network per call. Collapsing them to two saved
+  144 cells on the `mon` stage, which was real but a fifth of what the arithmetic
+  suggested. Serializing them to one bit per cycle is what actually paid: the
+  link gives about 1170 cycles per byte and this needs eight.
+- **The reply payload was a 160-bit register loaded from four sources**, which is
+  a 160-bit 4:1 multiplexer. `IDENT` is entirely constant and `ACK` and `NAK` are
+  three bytes between them, so all three are now built where the byte goes out
+  and only `STATE` is captured.
+- **`MAX_PAYLOAD` is 128, not 256**, which puts the length in eight bits rather
+  than nine and narrows four counters. The link is unaffected: at 11.5 KB/s a
+  frame is milliseconds whatever the header costs.
+
+Timing did not suffer — `clk_sys` places at **15.935 MHz against 13.500** with
+zero setup violations, against 14.98 before — but 99% utilization is the
+narrowest this design has been, and the Risks section below records `clk_out`
+losing 5% of margin on congestion alone between 76% and 89%. **The next thing
+added here will not fit.** The levers left, cheapest first: drop `CONSOLE_IN`
+(nothing in `emu/programs/` reads the UART), then cache size.
+
+### It found three defects, two of them in the core
+
+- The two `idle` terms above.
+- **`tx_len[LEN_W-1]` as the length's high byte.** Correct while `LEN_W` was 9
+  and wrong the moment it became 8, at which point a `DATA` frame of 128 bytes
+  announced 384 and the host waited for bytes that never came.
+  `8'(16'(tx_len) >> 8)` instead.
+- And one in the build script rather than the design: **`build.sh` captured
+  nothing from `gw_sh`.** Every failing build produced an empty log, which is the
+  "silent toolchain failure" the Risks section says to bisect blindly. It is not
+  silent — run it in a pipe rather than a file redirect and it says exactly what
+  is wrong. The 8645-cell overflow above was diagnosed by an hour of bisection
+  that reading the message would have cost a minute.
+
+### Verification
+
+- **`rtl/tb/tb_mon.sv`**, 90 checks, driving the monitor's byte interfaces
+  directly — three orders of magnitude faster than real serial waveforms, which
+  `tb_uart` already covers. Frame parsing, CRC rejection and resynchronization,
+  length and address bounds, write lane masks, reads crossing word boundaries,
+  the pause ordering watched continuously rather than sampled, console coalescing
+  and back-pressure.
+- **`rtl/tb/tb_soc.sv`** now bit-bangs real frames at the pins and decodes the
+  transmit line. It loads `fib.bin` over the wire, reads every byte back and
+  compares, resets, resumes, and requires the loaded program to print `55`. It
+  used to count `core_tx_valid && tx_ready`, which stopped meaning anything the
+  moment the monitor came between those two signals — the count would have stayed
+  plausible while testing nothing.
+- **`PAUSE=N bash rtl/sim/cosim.sh`** injects random host pauses into
+  `fetch_hold`. Nothing commits during a pause, so a paused run and an unpaused
+  one must produce byte-for-byte identical results — the same argument as
+  `LATENCY`, and the strongest evidence available that the mechanism is correct.
+  313615 comparisons, identical at `PAUSE=0` and `PAUSE=8`. The run reports how
+  many pauses actually fired, so a rate that never paused cannot pass by looking
+  like success.
+- **New mutants**, and one of them went `MISSED` first: with memory answering in
+  five cycles the read data was always ready inside the gap between two
+  transmitted bytes, so a transmitter that shipped a byte before memory replied
+  shipped the right one anyway. The test only became sensitive once memory was
+  made slow for that case.
+
+**Gate: met in simulation, and the bitstream builds and meets timing on every
+clock the design owns.** Not yet flashed — `bash rtl/board/build.sh mon` then
+`kctl ping` is the first thing to try on a board, because it proves framing, baud
+and memory access with the CPU absent.
+
 ## Risks
 
 - **Logic utilization is the binding constraint, not BSRAM.** v1 was at 55% of 8640 before a

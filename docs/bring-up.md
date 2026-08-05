@@ -14,7 +14,8 @@ From a Git Bash prompt:
 bash rtl/board/build.sh blink       # 1. toolchain, pinout, clock
 bash rtl/board/build.sh loopback    # 2. UART pins and baud rate
 bash rtl/board/build.sh psram       # 3. PLL, PSRAM controller, calibration
-bash rtl/board/build.sh soc         # 4. the whole machine
+bash rtl/board/build.sh mon         # 4. the host protocol over PSRAM, no CPU
+bash rtl/board/build.sh soc         # 5. the whole machine
 ```
 
 Or from PowerShell, naming Git Bash explicitly:
@@ -29,7 +30,7 @@ Flash with either the Gowin Programmer GUI or:
 openFPGALoader -b tangnano9k rtl/board/out/soc/impl/pnr/project.fs
 ```
 
-**All four stages have run on hardware**, on a Tang Nano 9K over the on-board
+**Stages 1 to 4 as numbered before the monitor existed have run on hardware**, on a Tang Nano 9K over the on-board
 USB serial bridge at 115200 8N1. `fibforever` counts the 32-bit Fibonacci
 sequence and wraps back to zero after 2971215073.
 
@@ -379,7 +380,75 @@ percent, which is not a margin. There is nothing to defend by running fast: a
 `init_calib` never rises on hardware, the memory clock is the first thing to
 suspect** — 162 MHz is `FBDIV_SEL=5, ODIV_SEL=4` in `k2g_pll.sv`.
 
-## Stage 4 — the full machine
+## Stage 4 — the host monitor
+
+The host protocol over real PSRAM, with **no CPU in the design**. This is the
+first stage in which framing, a baud rate, a clock crossing and 8 MB of memory
+are all present at once; put that straight into `soc` and a board that will not
+answer could be any of them, plus the core, the caches and the boot copier.
+
+```bash
+bash rtl/board/build.sh mon
+openFPGALoader -b tangnano9k rtl/board/out/mon/impl/pnr/project.fs
+```
+
+```bash
+K2G_PORT=COM3 cargo run --bin kctl -- ping
+```
+
+```
+protocol 1  core_id 0x4b324731  memory 8388608 bytes  max payload 128
+capabilities: memory, console
+```
+
+`k2g_mon` is built here with `HAS_RUN_CONTROL` clear, so it reports memory and
+console but not run control and refuses `RESET` rather than making the host find
+out by timing out. Then:
+
+```bash
+K2G_PORT=COM3 cargo run --bin kctl -- poke 0x1000 0xDE 0xAD 0xBE 0xEF
+```
+
+```bash
+K2G_PORT=COM3 cargo run --bin kctl -- peek 0x1000 16
+```
+
+`poke` writes and reads back and compares, so it fails loudly rather than
+returning what it just sent.
+
+The console is looped back on itself through the monitor's own buffers, which
+makes this the `loopback` stage again with framing on: a `CONSOLE_IN` frame comes
+back as `CONSOLE_OUT`, exercising the whole console path with no program to
+produce output.
+
+LEDs, active low at the pin, so a lit LED is a 1:
+
+| LED | Meaning |
+|---|---|
+| 0 | the PSRAM controller has calibrated — nothing works before this |
+| 1 | the monitor owns the bus (the host has sent `PAUSE`) |
+| 2 | a byte arrived on the serial line |
+| 3 | a byte went out |
+| 5 | heartbeat, proving `clk_sys` runs |
+
+A board showing only the heartbeat has a serial problem — baud rate, pins, or the
+cable. One showing LED2 but never LED3 is receiving and not answering, which
+points at framing rather than at the link.
+
+| | |
+|---|---|
+| Logic | 2876 / 8640 (34%) |
+| Registers | 1297 / 6771 |
+| BSRAM | 4 / 26 |
+| `clk_sys` | 55.097 MHz against 13.500 |
+| `clk_out` | 62.434 MHz against 40.500 |
+| Setup violations | 0 |
+
+**The monitor itself is about 684 of those cells**, measured by replacing
+`k2g_mon` with tie-offs and rebuilding: 2876 against 2192. In `soc`, where run
+control is enabled and the placer has no room, it costs 906.
+
+## Stage 5 — the full machine
 
 ```
 boot ROM -> copier -> 8 MB in-package PSRAM -> K2G core -> UART
@@ -551,14 +620,27 @@ The baud divisor follows `CLK_DIV` automatically, and got better on the way:
 
 ## Terminal conventions
 
-Programs emit **CRLF**, not a bare LF. A serial terminal treats LF as "move
-down one row" and leaves the column alone, so a bare newline makes each line
-start where the previous one ended — output marches diagonally off the right
-of the screen. This is a terminal convention, not a bug in the machine: the
-same bytes look correct piped to a file or through the emulator's stdout.
+**A plain terminal no longer shows the console.** From the `mon` stage onwards
+every byte on the wire is inside a frame — see [host-control.md](host-control.md)
+— so attaching PuTTY to the board shows framing bytes and a CRC rather than
+text. Use:
 
-PuTTY can paper over it with *Terminal → Implicit CR in every LF*, but sending
-CRLF is what a serial device is expected to do.
+```bash
+K2G_PORT=COM3 cargo run --bin kctl -- console
+```
+
+That was the price of letting the program's output and the host's commands share
+one pair of pins. The alternative, raw console bytes with framed commands
+interleaved, makes a program that happens to print the magic sequence
+indistinguishable from a command; "the machine is wedged" is a bad thing to have
+to diagnose over a serial cable. The `loopback` stage is unaffected and still
+echoes typed characters.
+
+Programs still emit **CRLF**, not a bare LF, and for the same reason as before:
+a terminal treats LF as "move down one row" and leaves the column alone, so a
+bare newline makes each line start where the previous one ended and output
+marches diagonally off the right of the screen. `kctl console` writes the bytes
+through unchanged, so this stays the program's business.
 
 ## Reset
 
@@ -571,7 +653,13 @@ signal starts asserted.
 ## Flow control on the UART
 
 The core is roughly fifty times faster than a 115200 baud line, so a `CSP`
-write to `UART_DATA` **stalls** until the transmitter is free.
+write to `UART_DATA` **stalls** until there is somewhere to put the byte.
+
+Since the monitor arrived, "somewhere" is its console buffer rather than the
+transmitter itself: `uart_tx_ready` into `k2g_csp` is now "the buffer has room",
+and the monitor drains it into `CONSOLE_OUT` frames. The stall is unchanged in
+every way that matters, which is the point — it is still architecturally
+invisible, and `hello` still takes 181 instructions.
 
 Without that the first hardware run printed `H` and a newline and nothing else:
 each new byte overwrote the one still being shifted out, so after the `H`

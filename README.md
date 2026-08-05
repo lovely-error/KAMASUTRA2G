@@ -38,6 +38,8 @@ matches it.
 - **[docs/toolchain.md](docs/toolchain.md)** — `kasm` and `kdis`: assembly syntax, every
   mnemonic, prefixes, directives and diagnostics.
 - **[docs/bring-up.md](docs/bring-up.md)** — getting the machine onto a Tang Nano 9K.
+- **[docs/host-control.md](docs/host-control.md)** — the wire protocol `kctl` speaks to
+  the board: framing, commands, and what a pause actually does.
 - **[docs/gowin-sv-support.md](docs/gowin-sv-support.md)** — which SystemVerilog constructs the
   Gowin toolchain actually accepts, measured rather than assumed.
 
@@ -54,6 +56,24 @@ Hello from KAMASUTRA2G!
 halted after 181 instructions
 ```
 
+## Running one on a board
+
+The program no longer has to be built into the bitstream. With the `soc`
+bitstream flashed:
+
+```bash
+cd emu && K2G_PORT=COM3 cargo run --bin kctl -- run hello.bin
+```
+
+`kctl` stops the core, writes the image over the serial link, reads it back and
+compares, resets and lets go. `kctl console` shows what the program prints,
+`kctl peek <addr> <count>` dumps memory, and `kctl status` reports why a stopped
+machine stopped — which used to be readable only from six LEDs, since a halted
+core cannot execute the CSP read that would report its own fault cause.
+
+Every byte on that link is framed, so a plain terminal will not show the console.
+[docs/host-control.md](docs/host-control.md) says why and what the frames are.
+
 | Tool | What it does |
 |---|---|
 | `kasm` | Assembler. `--listing` disassembles what it produced; `--labels` dumps the symbol table. |
@@ -61,6 +81,7 @@ halted after 181 instructions
 | `emu` | Runner. `--trace` emits per-instruction architectural state for cosimulation; also `--regs`, `--dump`, `--max-steps`. |
 | `gen_defs` | Regenerates `rtl/k2g_pkg.sv` and `docs/isa-opcodes.md`. |
 | `kgen` | Generates random programs for differential testing. |
+| `kctl` | Drives a board over the serial link: load, run, pause, read and write memory, console. |
 
 ## Verifying
 
@@ -68,6 +89,20 @@ Everything that shells out to Gowin or Questa needs **Git Bash, not WSL** —
 WSL cannot reach the Windows toolchains. From PowerShell, name it explicitly:
 `& "C:\Program Files\Git\bin\bash.exe" <script>`. The scripts detect this
 and say so.
+
+**Run one of these at a time.** The Questa licence here is nodelocked and refuses
+a second concurrent instance:
+
+```
+** Error: License checkout has been disallowed because ... an instance of
+QuestaSim is already running with a nodelocked license on this machine.
+```
+
+That error lands in the per-test log rather than on the console, so a second run
+started while `mutants.sh` is going does not fail loudly — it produces a sweep
+full of mutants that "were not caught" because nothing ever ran. `mutants.sh`
+already waits for its own simulator to exit between mutants; what it cannot do
+is wait for yours.
 
 ```bash
 cd emu && cargo test          # emulator, assembler, spec conformance
@@ -100,6 +135,17 @@ A stall is architecturally invisible by construction — nothing commits during 
 latency setting must give byte-for-byte identical results. Anything else means the core is reading
 state it does not own.
 
+The same argument, and the same shape of test, for the host's pause:
+
+```bash
+PAUSE=8 bash rtl/sim/cosim.sh
+```
+
+`fetch_hold` stops the front end and the pipeline drains, so the stop lands mid
+prefix chain, with a load outstanding, between a widening multiply's two cycles —
+and none of it may be visible. The run reports how many pauses actually fired, so
+a rate that never paused cannot pass by looking like success.
+
 ### Tests that are supposed to fail
 
 A passing testbench proves nothing on its own; it might be checking something that cannot fail.
@@ -110,10 +156,22 @@ A passing testbench proves nothing on its own; it might be checking something th
 | `up.ready` follows `down.ready` — a channel's rule 3 | `tb_chan` |
 | one-entry buffer instead of two — passes everything else, runs at half rate | `tb_chan` |
 | skid buffer ignores `flush` | `tb_chan` |
-| a load assumes memory answers in one cycle | `cosim` **only with `LATENCY` set** |
+| a load assumes memory answers in one cycle | `cosim` |
+| a pause abandons the fetch stream | `cosim` **only with `PAUSE` set** |
+| the monitor accepts a frame with a bad CRC | `tb_mon` |
+| the monitor takes the memory bus before the caches are coherent | `tb_mon` |
 
-The last row is the argument for latency injection existing at all: that mutant passes the entire
-cosimulation at `LATENCY=0` and diverges after 41 instructions at `LATENCY=40`.
+The last row of that table used to be the load mutant, with the note that it passes the entire
+cosimulation at `LATENCY=0` and diverges after 41 instructions at `LATENCY=40` — one defect,
+invisible without latency injection and fatal with it. **That is no longer true**, and the reason
+is Phase 2e: the bus request is registered now, so an access occupies the memory stage for at least
+two cycles even against memory that answers immediately, and the mutant is caught in every
+configuration the design still has. Latency injection is not thereby less valuable — it is how the
+whole variable-latency contract was proved — but this particular demonstration of it is gone, and
+`rtl/sim/mutants.sh` records the reversal where the entry used to be.
+
+The pause row is the replacement argument, for host control: a pause commits nothing, so `PAUSE=0`
+cannot tell a correct one from a broken one.
 
 Mutations apply to a throwaway copy of `rtl/`, never to the tree. A mutation whose pattern no
 longer matches is reported as `STALE` and fails the run, rather than being skipped — a guard that
