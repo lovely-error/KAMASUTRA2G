@@ -33,7 +33,11 @@ matches it.
 
 ## Documents
 
-- **[docs/isa-spec.md](docs/isa-spec.md)** — the specification. Start here.
+- **[docs/development.md](docs/development.md)** — how to work here: every script,
+  what it does, the phase gate, and the traps that have already cost someone a day.
+  **Start here if you are going to change something.**
+- **[docs/isa-spec.md](docs/isa-spec.md)** — the specification. Start here to
+  understand the machine.
 - **[docs/isa-opcodes.md](docs/isa-opcodes.md)** — opcode encodings. *Generated.*
 - **[docs/toolchain.md](docs/toolchain.md)** — `kasm` and `kdis`: assembly syntax, every
   mnemonic, prefixes, directives and diagnostics.
