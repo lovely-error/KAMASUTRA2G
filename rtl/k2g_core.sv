@@ -869,7 +869,21 @@ module k2g_core
   // A load returns whenever the bus answers; everything else is immediate.
   wire logic        load_done    = m_load_done;
   wire logic [31:0] load_shifted = dbus.rsp_data >> {pend_addr_lo, 3'b000};
-  wire logic [31:0] load_value   = rdt_normalize(load_shifted, pend_tag);
+
+  // ONE normalize, after the mux, not one per source. Six branches below used
+  // to call `rdt_normalize` on their own result, which put a sign/zero-extend
+  // in front of six of the mux's inputs; here each branch names the value it
+  // produced and the tag to normalize it to, and the single extend at the end
+  // is shared. RDT_U32 is the identity -- `rdt_normalize` returns `v` for
+  // width code 2'b10 -- so a branch whose result is already normalized leaves
+  // `nw_norm` at its default and pays nothing.
+  //
+  // `nw_norm` is NOT `nw_tag`: a shift normalizes to the operand's tag while
+  // writing back the destination's, so the two differ on three branches.
+  logic [31:0] nw_raw;
+  logic [2:0]  nw_norm;
+
+  assign nw_value = rdt_normalize(nw_raw, nw_norm);
 
   always_comb begin
     nwe_value    = 1'b0;
@@ -877,7 +891,8 @@ module k2g_core
     nwe_overflow = 1'b0;
     nwe_flag     = 1'b0;
     nw_addr      = uop.dst;
-    nw_value     = 32'd0;
+    nw_raw       = 32'd0;
+    nw_norm      = RDT_U32;
     nw_tag       = uop.datakind;
     nw_overflow  = 1'b0;
     nw_flag      = 1'b0;
@@ -887,7 +902,8 @@ module k2g_core
     if (load_done) begin
       // The cycle the bus answers a load.
       nw_addr   = pend_dst;
-      nw_value  = load_value;
+      nw_raw    = load_shifted;
+      nw_norm   = pend_tag;
       nw_tag    = pend_tag;
       nwe_value = 1'b1;
       nwe_tag   = 1'b1;
@@ -899,7 +915,7 @@ module k2g_core
       // destination's tag alone, and restoring it here also produces the
       // right answer in the aliased case, where cycle one set it to U32.
       nw_addr   = pend_dst;
-      nw_value  = pend_lo;
+      nw_raw    = pend_lo;
       nw_tag    = pend_tag;
       nwe_value = 1'b1;
       nwe_tag   = 1'b1;
@@ -908,7 +924,8 @@ module k2g_core
         UOP_PUT_IMM: begin
           // Normalized to the tag, so a register's bits always match what its
           // tag claims (spec 5.1, 1.1.1).
-          nw_value     = rdt_normalize(uop.imm, uop.datakind);
+          nw_raw       = uop.imm;
+          nw_norm      = uop.datakind;
           nw_tag       = uop.datakind;
           nwe_value    = 1'b1;
           nwe_tag      = 1'b1;
@@ -918,14 +935,15 @@ module k2g_core
         UOP_SET_TAG: begin
           // RDT re-normalizes, which is what makes LD8 + RDT S8 a
           // sign-extending byte load (spec 5.10).
-          nw_value  = rdt_normalize(xa_value, uop.datakind);
+          nw_raw    = xa_value;
+          nw_norm   = uop.datakind;
           nw_tag    = uop.datakind;
           nwe_value = 1'b1;
           nwe_tag   = 1'b1;
         end
         UOP_COPY: begin
           // A full move: value, tag and both flags (spec 5.2).
-          nw_value     = xb_value;
+          nw_raw       = xb_value;
           nw_tag       = xb_tag;
           nw_overflow  = xb_ovf;
           nw_flag      = xb_flag;
@@ -935,7 +953,8 @@ module k2g_core
           nwe_flag     = 1'b1;
         end
         UOP_CSP_LOAD: begin
-          nw_value  = rdt_normalize(csp_rdata, uop.datakind);
+          nw_raw    = csp_rdata;
+          nw_norm   = uop.datakind;
           nw_tag    = uop.datakind;
           nwe_value = 1'b1;
           nwe_tag   = 1'b1;
@@ -945,13 +964,13 @@ module k2g_core
             // Widening multiply, first cycle: the HIGH half into the UTO
             // register, tagged U32. The low half follows next cycle.
             nw_addr   = uop.uto_reg;
-            nw_value  = product[63:32];
+            nw_raw    = product[63:32];
             nw_tag    = RDT_U32;
             nwe_value = 1'b1;
             nwe_tag   = 1'b1;
             // A widening multiply writes no overflow; plain MUL does.
           end else begin
-            nw_value     = (uop.arith_op == ARITH_MUL) ? product[31:0] : arith_result;
+            nw_raw       = (uop.arith_op == ARITH_MUL) ? product[31:0] : arith_result;
             nwe_value    = 1'b1;
             nw_overflow  = (uop.arith_op == ARITH_MUL) ? (|product[63:32])
                                                       : arith_overflow;
@@ -967,18 +986,19 @@ module k2g_core
             endcase
             nwe_flag = 1'b1;
           end else begin
-            nw_value  = logic_result;
+            nw_raw    = logic_result;
             nwe_value = 1'b1;
           end
         end
         UOP_SHIFT: begin
-          nw_value  = rdt_normalize(shift_result, xa_tag);
+          nw_raw    = shift_result;
+          nw_norm   = xa_tag;
           nwe_value = 1'b1;
         end
         UOP_BEXT: begin
           // Extract writes the whole register; insert writes only the value
           // (spec 5.8).
-          nw_value     = bext_result;
+          nw_raw       = bext_result;
           nw_tag       = RDT_U32;
           nw_overflow  = 1'b0;
           nw_flag      = 1'b0;
@@ -988,7 +1008,7 @@ module k2g_core
           nwe_flag     = 1'b1;
         end
         UOP_BINS: begin
-          nw_value  = bins_result;
+          nw_raw    = bins_result;
           nwe_value = 1'b1;
         end
         UOP_CMP: begin
@@ -1001,7 +1021,8 @@ module k2g_core
             nw_flag  = ~xa_flag;
             nwe_flag = 1'b1;
           end else begin
-            nw_value  = rdt_normalize(unary_result, xa_tag);
+            nw_raw    = unary_result;
+            nw_norm   = xa_tag;
             nwe_value = 1'b1;
           end
         end
@@ -1010,7 +1031,7 @@ module k2g_core
           // in the usual idiom is the TC itself (spec 6.3).
           if (uop.uto_valid) begin
             nw_addr   = uop.uto_reg;
-            nw_value  = isa + uop.size_bytes;
+            nw_raw    = isa + uop.size_bytes;
             nw_tag    = RDT_U32;
             nwe_value = 1'b1;
             nwe_tag   = 1'b1;
