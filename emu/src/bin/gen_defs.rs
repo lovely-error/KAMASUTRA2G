@@ -1,6 +1,7 @@
 //! Writes the generated RTL and documentation: `rtl/k2g_pkg.sv` and
 //! `docs/isa-opcodes.md` from the opcode enums in `emu/src/insns.rs`, and
-//! `rtl/k2g_host_pkg.sv` from the wire protocol in `emu/src/hostproto.rs`.
+//! `rtl/k2g_host_pkg.sv` from the wire protocol in `emu/src/hostproto.rs`, and
+//! `rtl/k2g_pkg.ddl` for the DDL compiler.
 //!
 //! Usage (from the `emu/` directory):
 //!
@@ -59,6 +60,10 @@ fn main() -> ExitCode {
 		// map -- it is written down in Rust for `kctl` and in SystemVerilog for
 		// `k2g_mon` -- and takes the same answer.
 		(root.join(emu::hostproto::SV_OUTPUT_PATH), emu::hostproto::emit_host_pkg_sv()),
+		// The DDL counterpart of k2g_pkg.sv. DDL modules cannot include the
+		// SystemVerilog package, so the encodings would otherwise be written
+		// down a third time -- see emu/src/ddl_gen.rs.
+		(root.join(emu::ddl_gen::OUTPUT_PATH), emu::ddl_gen::emit_ddl()),
 	];
 
 	if check_only {

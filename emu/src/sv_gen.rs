@@ -63,7 +63,9 @@ pub fn find_duplicates(
 }
 
 /// Every opcode enum, as `(sv_type_name, rust_enum_name, bits, variants)`.
-fn all_enums() -> Vec<(&'static str, &'static str, u32, &'static [(&'static str, u16)])> {
+/// Shared with `ddl_gen`, so the DDL and SystemVerilog outputs cannot list
+/// different enums.
+pub fn all_enums() -> Vec<(&'static str, &'static str, u32, &'static [(&'static str, u16)])> {
 	vec![
 		("lb_e", "LB", LB::BITS, LB::VARIANTS),
 		("ep1_e", "EP1", EP1::BITS, EP1::VARIANTS),
