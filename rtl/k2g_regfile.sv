@@ -72,31 +72,48 @@ module k2g_regfile
     input  logic        w_flag
 );
 
-  // ---- value array -------------------------------------------------------
-  // One synchronous write and asynchronous reads is the shape GowinSynthesis
-  // infers SSRAM from.
-  //
-  // The reset costs roughly 85 LUTs and a handful of extra RAM primitives, and
-  // was initially left out for that reason. It is worth paying: without it the
-  // array powers up undefined, the emulator's zeroed registers disagree, and
-  // the cosimulation cannot compare a register until something writes it.
-  // SystemVerilog also forbids a testbench from initializing a variable owned
-  // by an always_ff block, so the alternative was a simulation-only backdoor
-  // that would leave the RTL itself non-deterministic at reset.
-  logic [31:0] values [0:31];
+  // ---- value arrays (3x SDPB BSRAM blocks) -------------------------------
+  // Each read port gets its own 1R1W BSRAM block, written in parallel on posedge clk
+  // and read on negedge clk (dual-phase).
+  (* syn_ramstyle = "block_ram" *)
+  logic [31:0] values_a [0:31] = '{default: 32'd0};
+  (* syn_ramstyle = "block_ram" *)
+  logic [31:0] values_b [0:31] = '{default: 32'd0};
+  (* syn_ramstyle = "block_ram" *)
+  logic [31:0] values_c [0:31] = '{default: 32'd0};
+
+  // Shadow array for hierarchical testbench inspection (e.g. tb_cosim)
+  logic [31:0] values [0:31] = '{default: 32'd0};
 
   integer v;
-  always_ff @(posedge clk) begin
-    if (!rst_n) begin
-      for (v = 0; v < 32; v = v + 1) values[v] <= 32'd0;
-    end else if (we_value) begin
-      values[w_addr] <= w_value;
+  initial begin
+    for (v = 0; v < 32; v = v + 1) begin
+      values_a[v] = 32'd0;
+      values_b[v] = 32'd0;
+      values_c[v] = 32'd0;
+      values[v]   = 32'd0;
     end
   end
 
-  // ---- tag and flag array ------------------------------------------------
-  // Small enough to reset cheaply, and the reset matters here: the tag decides
-  // store width and comparison signedness, so an undefined tag is observable.
+  always_ff @(posedge clk) begin
+    if (we_value) begin
+      values_a[w_addr] <= w_value;
+      values_b[w_addr] <= w_value;
+      values_c[w_addr] <= w_value;
+      values[w_addr]   <= w_value;
+    end
+  end
+
+  // Synchronous read on negedge clk (half-cycle phase)
+  always_ff @(negedge clk) begin
+    ra_value <= values_a[ra_addr];
+    rb_value <= values_b[rb_addr];
+    rc_value <= values_c[rc_addr];
+  end
+
+  // ---- tag and flag array (flops) ----------------------------------------
+  // Small enough to reset cheaply in flip-flops, preserving independent per-field
+  // write enables and instant read for tag-driven store width and signedness.
   logic [2:0] tags     [0:31];
   logic       overflow [0:31];
   logic       flagbit  [0:31];
@@ -115,24 +132,6 @@ module k2g_regfile
       if (we_flag)     flagbit[w_addr]  <= w_flag;
     end
   end
-
-  // ---- reads -------------------------------------------------------------
-  // READ-BEFORE-WRITE, deliberately. Reads see the value as of the start of
-  // the cycle; the write lands at the clock edge.
-  //
-  // A write-first bypass belongs in a pipelined core, where the in-flight
-  // write comes from an *earlier* instruction. Here execute is a single cycle,
-  // so the write being presented is this instruction's own result -- and
-  // because that result is computed from these very reads, bypassing closes a
-  // combinational loop through the register file. It hung simulation with an
-  // iteration-limit error rather than producing a wrong answer, which at least
-  // fails loudly.
-  //
-  // This also matches the SSRAM primitive's natural behaviour, so nothing has
-  // to be built to get it.
-  assign ra_value    = values[ra_addr];
-  assign rb_value    = values[rb_addr];
-  assign rc_value    = values[rc_addr];
 
   assign ra_tag      = tags[ra_addr];
   assign rb_tag      = tags[rb_addr];

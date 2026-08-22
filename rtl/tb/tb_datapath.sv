@@ -173,30 +173,29 @@ module tb_datapath
     @(negedge clk); rst_n = 1;
     @(posedge clk);
 
-    ra_addr = 5'd3; #1;
+    ra_addr = 5'd3; @(negedge clk); #1;
     check("reset value", ra_value == 32'd0);
     check("reset tag",   ra_tag == RDT_U32);
 
     rf_write(5'd3, 32'hCAFE_BABE, RDT_S16);
-    ra_addr = 5'd3; #1;
+    ra_addr = 5'd3; @(negedge clk); #1;
     check("write then read value", ra_value == 32'hCAFE_BABE);
     check("write then read tag",   ra_tag == RDT_S16);
 
     // Two ports read independently.
     rf_write(5'd7, 32'd42, RDT_U8);
-    ra_addr = 5'd3; rb_addr = 5'd7; #1;
+    ra_addr = 5'd3; rb_addr = 5'd7; @(negedge clk); #1;
     check("port A", ra_value == 32'hCAFE_BABE);
     check("port B", rb_value == 32'd42);
     check("port B tag", rb_tag == RDT_U8);
 
     // Reads are read-before-write: a read in the same cycle as a write sees
-    // the OLD value, and the write lands at the edge. A bypass here would
-    // close a combinational loop, since in a single-cycle core the write data
-    // is computed from these reads.
+    // the OLD value, and the write lands at the edge.
     rf_write(5'd9, 32'hAAAA_0000, RDT_U32);
-    @(negedge clk);
+    @(posedge clk);
+    ra_addr = 5'd9;
     w_addr = 5'd9; w_value = 32'h1234_5678; we_value = 1;
-    ra_addr = 5'd9; #1;
+    @(negedge clk); #1;
     check("read sees the old value during a write", ra_value == 32'hAAAA_0000);
     @(posedge clk); @(negedge clk); we_value = 0;
     #1; check("write landed on the edge", ra_value == 32'h1234_5678);
@@ -207,7 +206,7 @@ module tb_datapath
     @(negedge clk);
     w_addr = 5'd11; w_flag = 1; we_flag = 1;
     @(posedge clk); @(negedge clk); we_flag = 0;
-    ra_addr = 5'd11; #1;
+    ra_addr = 5'd11; @(negedge clk); #1;
     check("flag written alone",   ra_flag);
     check("value untouched",      ra_value == 32'hAAAA_AAAA);
     check("tag untouched",        ra_tag == RDT_U32);
@@ -216,7 +215,7 @@ module tb_datapath
     @(negedge clk);
     w_addr = 5'd11; w_overflow = 1; we_overflow = 1;
     @(posedge clk); @(negedge clk); we_overflow = 0;
-    #1;
+    ra_addr = 5'd11; @(negedge clk); #1;
     check("overflow written alone", ra_overflow);
     check("flag still set",         ra_flag);
     check("value still untouched",  ra_value == 32'hAAAA_AAAA);
@@ -224,7 +223,7 @@ module tb_datapath
     // Reset leaves tags defined even though the value array has no reset --
     // an undefined tag would be observable, since it decides store width and
     // comparison signedness.
-    ra_addr = 5'd20; #1;
+    ra_addr = 5'd20; @(negedge clk); #1;
     check("unwritten register has a defined tag", ra_tag == RDT_U32);
     check("unwritten register has clear flags", !ra_flag && !ra_overflow);
 
