@@ -1,0 +1,71 @@
+// Constraints for the `hdmifb` stage. SELF-CONTAINED.
+//
+// A stage file REPLACES the shared tangnano9k.cst rather than adding to it,
+// the same rule the .sdc files already follow. The shared file names uart_tx
+// and uart_rx, and every top that uses it has to declare those ports even when
+// it does nothing with them -- k2g_blink.sv says so in a comment. This stage
+// declines that trade: it has four differential pairs the other stages do not
+// have, and carrying idle UART pins to make one file serve both would be the
+// wrong half of the deal.
+
+// THE CRYSTAL'S I/O STANDARD IS DECLARED HERE, and it has to be. Pin 52 is in
+// BANK 1, which is also where the four HDMI pairs are, and a bank has one
+// VCCIO. Left to the default -- which is what the shared tangnano9k.cst does,
+// deliberately, because bank 3 is locked to 1.8 V by the in-package PSRAM --
+// the tool settles bank 1 at 1.8 V too and then rejects the pairs:
+//
+//   ERROR (CT1136) : Bank 1 vccio(1.8) is locked by other constraint or
+//   embedded port, conflicting BANK_VCCIO set by 'u_buf_clk' :
+//   IO_TYPE = LVCMOS33D in the same bank
+//
+// Naming LVCMOS33 on the crystal settles the bank at 3.3 V instead, which is
+// what the pairs need and what the board supplies. This one line is the whole
+// difference between this file and a build that stops at the constraint
+// reader.
+IO_LOC  "clk_27m" 52;
+IO_PORT "clk_27m" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// rst_n and the LEDs are in BANK 3, which really is locked to 1.8 V by the
+// PSRAM die, so they keep the bank default exactly as the shared file does.
+IO_LOC  "rst_n" 4;
+IO_PORT "rst_n" PULL_MODE=UP;
+
+// Six LEDs, ACTIVE LOW -- driving a 0 lights the LED.
+IO_LOC  "led[0]" 10;
+IO_LOC  "led[1]" 11;
+IO_LOC  "led[2]" 13;
+IO_LOC  "led[3]" 14;
+IO_LOC  "led[4]" 15;
+IO_LOC  "led[5]" 16;
+
+// ---- HDMI ----
+//
+// TWO PIN NUMBERS PER LINE, positive first. That is how Gowin constrains a
+// differential pair: the N side is not named as a port here even though the
+// RTL drives it, because ELVDS_OBUF presents the pair as one object to the
+// placer.
+//
+// The numbers are from Sipeed's own TangNano-9K-example/hdmi/src/hdmi.cst and
+// cross-checked against the Gowin device file
+// (IDE/data/device/GW1NR-9C/QFN88P.json), which confirms 68..75 are five
+// consecutive DIFF P/N pairs in bank 1.
+//
+// THOSE PAIRS ARE NOT MARKED `TRUELVDS` in the device file. The flag appears
+// on bank 2 and on parts of banks 1 and 3, and on none of these -- which is
+// why k2g_hdmi_out.sv instantiates ELVDS_OBUF and not TLVDS_OBUF. Board-level
+// resistors do the rest.
+//
+// PULL_MODE=NONE matters: a pull resistor on a 252 Mbit/s differential pair is
+// a termination mismatch.
+
+IO_LOC  "tmds_clk_p" 69,68;
+IO_PORT "tmds_clk_p" PULL_MODE=NONE DRIVE=8;
+
+IO_LOC  "tmds_d_p[0]" 71,70;
+IO_PORT "tmds_d_p[0]" PULL_MODE=NONE DRIVE=8;
+
+IO_LOC  "tmds_d_p[1]" 73,72;
+IO_PORT "tmds_d_p[1]" PULL_MODE=NONE DRIVE=8;
+
+IO_LOC  "tmds_d_p[2]" 75,74;
+IO_PORT "tmds_d_p[2]" PULL_MODE=NONE DRIVE=8;

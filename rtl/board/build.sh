@@ -7,12 +7,14 @@
 #   bash rtl/board/build.sh mon         # stage 4: the host monitor over PSRAM, no CPU
 #   bash rtl/board/build.sh soc         # stage 5: the whole machine
 #   bash rtl/board/build.sh hdmi        # stage 6: HDMI colour bars, no CPU
+#   bash rtl/board/build.sh hdmifb      # stage 7: a picture out of PSRAM, no CPU
 #
 # Staged deliberately. If the board misbehaves, the stage that fails says which
 # layer is at fault: blink means toolchain/pinout/clock, loopback means UART
 # pins or baud rate, psram means the memory or its PLL, mon means the host
 # protocol or the bus behind it, soc means the CPU or the memory image,
-# hdmi means the video PLL, the serializers or the HDMI pinout.
+# hdmi means the video PLL, the serializers or the HDMI pinout, hdmifb means
+# the framebuffer path between the memory and the screen.
 #
 # Flash with (openFPGALoader, or the Gowin programmer GUI):
 #   openFPGALoader -b tangnano9k rtl/board/out/<stage>/impl/pnr/project.fs
@@ -102,7 +104,25 @@ case "$STAGE" in
              "$HERE/k2g_hdmi_pll.sv" "$HERE/k2g_hdmi_out.sv"
              "$HERE/k2g_hdmi_probe.sv")
         ;;
-    *) echo "unknown stage '$STAGE' (blink | loopback | psram | mon | soc | hdmi)" >&2; exit 1 ;;
+    hdmifb)
+        # A picture out of PSRAM, still with NO CPU. `hdmi` proved the video
+        # path against a pattern made from the beam position, with no memory
+        # in it; this adds the memory and nothing else, so a board that shows
+        # bars at stage 6 and nothing here has a memory-path fault.
+        #
+        # BOTH rPLLs are used -- k2g_pll for the 81 MHz memory clock and
+        # k2g_hdmi_pll for the 126 MHz TMDS clock -- which is the arrangement
+        # the full machine needs and the reason to try it before that one.
+        TOP="k2g_hdmi_fb_probe"
+        SRC=("$RTL/k2g_pkg.sv" "$RTL/k2g_host_pkg.sv" "$RTL/k2g_types.svh"
+             "$RTL/k2g_membus.sv" "$RTL/k2g_cdc_fifo.sv" "$RTL/k2g_psram.sv"
+             "$RTL/k2g_video_timing.sv" "$RTL/k2g_tmds_encode.sv"
+             "$RTL/k2g_video_scanout.sv"
+             "$HERE/k2g_pll.sv" "$HERE/k2g_hdmi_pll.sv" "$HERE/k2g_hdmi_out.sv"
+             "$HERE/k2g_hdmi_fb_probe.sv"
+             "$ROOT/K2606/src/psram_memory_interface_hs/psram_memory_interface_hs.v")
+        ;;
+    *) echo "unknown stage '$STAGE' (blink | loopback | psram | mon | soc | hdmi | hdmifb)" >&2; exit 1 ;;
 esac
 
 rm -rf "$WORK"; mkdir -p "$WORK"
