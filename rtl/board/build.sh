@@ -6,11 +6,13 @@
 #   bash rtl/board/build.sh psram       # stage 3: PLL, PSRAM controller, calibration
 #   bash rtl/board/build.sh mon         # stage 4: the host monitor over PSRAM, no CPU
 #   bash rtl/board/build.sh soc         # stage 5: the whole machine
+#   bash rtl/board/build.sh hdmi        # stage 6: HDMI colour bars, no CPU
 #
 # Staged deliberately. If the board misbehaves, the stage that fails says which
 # layer is at fault: blink means toolchain/pinout/clock, loopback means UART
 # pins or baud rate, psram means the memory or its PLL, mon means the host
-# protocol or the bus behind it, soc means the CPU or the memory image.
+# protocol or the bus behind it, soc means the CPU or the memory image,
+# hdmi means the video PLL, the serializers or the HDMI pinout.
 #
 # Flash with (openFPGALoader, or the Gowin programmer GUI):
 #   openFPGALoader -b tangnano9k rtl/board/out/<stage>/impl/pnr/project.fs
@@ -82,12 +84,39 @@ case "$STAGE" in
               "$HERE/k2g_soc.sv"
               "$ROOT/K2606/src/psram_memory_interface_hs/psram_memory_interface_hs.v")
         ;;
-    *) echo "unknown stage '$STAGE' (blink | loopback | psram | mon | soc)" >&2; exit 1 ;;
+    hdmi)
+        # HDMI colour bars with NO CPU, NO PSRAM and NO UART. The video path is
+        # four things that can each fail silently -- a PLL whose dividers the
+        # part rejects, a CLKDIV that does not divide, a serializer fed the
+        # wrong clock, and a differential pair on pins that cannot drive it --
+        # and a dark monitor does not say which. This stage contains only
+        # those; the TMDS encoding underneath them is already proved by
+        # rtl/sim/run.sh tb_tmds.
+        #
+        # The two pure-logic modules come from rtl/ rather than here, the same
+        # split k2g_psram.sv uses: logic that can be simulated lives where the
+        # simulator's glob can reach it, and the pin-level primitives live next
+        # to the .cst that names their pins.
+        TOP="k2g_hdmi_probe"
+        SRC=("$RTL/k2g_video_timing.sv" "$RTL/k2g_tmds_encode.sv"
+             "$HERE/k2g_hdmi_pll.sv" "$HERE/k2g_hdmi_out.sv"
+             "$HERE/k2g_hdmi_probe.sv")
+        ;;
+    *) echo "unknown stage '$STAGE' (blink | loopback | psram | mon | soc | hdmi)" >&2; exit 1 ;;
 esac
 
 rm -rf "$WORK"; mkdir -p "$WORK"
 for f in "${SRC[@]}"; do cp "$f" "$WORK/"; done
-cp "$HERE/tangnano9k.cst" "$WORK/"
+# Constraints: a stage file REPLACES the shared one, exactly as the .sdc files
+# below do. The shared tangnano9k.cst names uart_tx and uart_rx, so every top
+# using it must declare those ports even when idle (k2g_blink.sv says so). A
+# stage with a different set of pins brings its own file instead.
+if [ -f "$HERE/tangnano9k_$STAGE.cst" ]; then
+    CST="tangnano9k_$STAGE.cst"
+else
+    CST="tangnano9k.cst"
+fi
+cp "$HERE/$CST" "$WORK/"
 # Timing: a stage file REPLACES the shared one rather than adding to it. Gowin
 # will not resolve a clock created in one .sdc from a constraint in another, so
 # split constraints fail with "Cannot get clock with name". Stage files are
@@ -112,7 +141,7 @@ cp "$HERE"/*.hex "$WORK/" 2>/dev/null || true
             *) echo "add_file -type verilog {$b}" ;;
         esac
     done
-    echo "add_file -type cst {tangnano9k.cst}"
+    echo "add_file -type cst {$CST}"
     echo "add_file -type sdc {$SDC}"
     echo "set_option -top_module $TOP"
     echo "set_option -verilog_std sysv2017"
@@ -173,6 +202,29 @@ fi
 
 echo "BUILD OK: $STAGE"
 echo "  bitstream: $FS ($(stat -c%s "$FS") bytes)"
+
+# WARNINGS ARE PRINTED ON SUCCESS, and this exists because one of them mattered
+# and nobody saw it. `k2g_hdmi_pll.sv` asked for ODIV_SEL = 6; the tool decided
+# 6 was not a legal value, substituted 8, built a working bitstream, and said so
+# only here:
+#
+#   WARN (EX0205) : Instance "u_rpll" 's parameter "ODIV_SEL" value invalid,
+#   replaced by default value "8"
+#
+# The part ran at a VCO 252 MHz from the one the source documented, and every
+# signal a person actually looks at -- exit status, bitstream, utilization,
+# timing -- was green. A parameter the tool silently rewrites is exactly the
+# class of defect this whole staged build exists to catch, so the log's own
+# report of it goes on the screen.
+warns="$(grep -iE '^WARN|WARN \(' "$WORK/build.log" 2>/dev/null)"
+if [ -n "$warns" ]; then
+    n="$(printf '%s
+' "$warns" | wc -l | tr -d ' ')"
+    echo "  $n warning(s):"
+    printf '%s
+' "$warns" | head -12 | sed 's/^/    /'
+    [ "$n" -gt 12 ] && echo "    ... $((n - 12)) more in $WORK/build.log"
+fi
 
 # Utilization, from the place-and-route report.
 rpt="$WORK/impl/pnr/project.rpt.txt"

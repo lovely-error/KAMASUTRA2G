@@ -72,6 +72,30 @@ FILTER="${1:-}"
 # of it, and a `survive` entry that cannot survive is a failing test rather than
 # an argument.
 
+# ---- why `tmds-disparity-survives-blanking` is a `survive` entry ----
+#
+# The DVI specification requires the encoder's running-disparity counter to be
+# zeroed during every blanking interval, and k2g_tmds_encode.sv does it. The
+# mutant removes the reset, and NOTHING CATCHES IT -- deliberately recorded
+# rather than quietly dropped, because the reason is a fact about the protocol.
+#
+# Decoding does not depend on the counter. A receiver recovers the byte from
+# bits 9 and 8 of the symbol alone, so a symbol encoded against a stale count
+# still decodes to the right value; the round-trip check cannot see this and no
+# amount of strengthening it will help.
+#
+# DC balance does not distinguish them either, which took measuring to believe.
+# Two of the four control symbols are not balanced (0101010100 has four ones,
+# 1010101011 has six), so blanking walks the wire's disparity by up to 2 per
+# symbol no matter what the counter does -- and a real link holds one control
+# symbol for the whole 96-pixel hsync. Against that, the residue carried across
+# a blanking boundary is not measurable. tb_tmds bounds the excursion inside an
+# active region, which is the part the receiver's eye depends on, and the
+# mutant stays inside it.
+#
+# Kept as `survive` so that if some future change DOES make the reset
+# observable, this entry fails loudly and says so.
+
 read -r -d '' MUTANTS <<'EOF'
 rule-3-ready-path
 k2g_chan.sv
@@ -536,6 +560,54 @@ k2g_core.sv
 detect
 hello
 cosimpause
+--
+tmds-disparity-survives-blanking
+k2g_tmds_encode.sv
+      cnt <= '0;
+      cnt <= cnt;
+survive
+tb_tmds
+run
+--
+tmds-recode-flag-inverted
+k2g_tmds_encode.sv
+    q_m[8] = ~use_xnor;
+    q_m[8] = use_xnor;
+detect
+tb_tmds
+run
+--
+tmds-tie-break-on-wrong-polarity
+k2g_tmds_encode.sv
+((n1_din == 4'd4) && (din[0] == 1'b0));
+((n1_din == 4'd4) && (din[0] == 1'b1));
+detect
+tb_tmds
+run
+--
+tmds-inversion-not-recorded
+k2g_tmds_encode.sv
+      dout <= {1'b1, q_m[8], ~q_m[7:0]};
+      dout <= {1'b0, q_m[8], ~q_m[7:0]};
+detect
+tb_tmds
+run
+--
+video-front-porch-off-by-one
+k2g_video_timing.sv
+    parameter int H_FRONT  = 16,
+    parameter int H_FRONT  = 17,
+detect
+tb_tmds
+run
+--
+video-hsync-polarity-inverted
+k2g_video_timing.sv
+  assign hsync = !((hcount >= 10'(H_SYNC_BEG)) && (hcount < 10'(H_SYNC_END)));
+  assign hsync =  ((hcount >= 10'(H_SYNC_BEG)) && (hcount < 10'(H_SYNC_END)));
+detect
+tb_tmds
+run
 EOF
 
 # ---- runner ------------------------------------------------------------
