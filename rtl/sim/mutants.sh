@@ -608,6 +608,38 @@ k2g_video_timing.sv
 detect
 tb_tmds
 run
+--
+scanout-buffer-too-small-for-its-stride
+k2g_video_scanout.sv
+  localparam int BUF_WORDS      = BUF_STRIDE * 2;                // 512
+  localparam int BUF_WORDS      = WORDS_PER_LINE * 2;            // 512
+detect
+tb_scanout
+run
+--
+scanout-requests-one-line-too-many
+k2g_video_scanout.sv
+    end else if (line_start && (next_req < target)
+    end else if (line_start && ({2'b00, req_line} < target)
+detect
+tb_scanout
+run
+--
+scanout-buffer-parity-swapped
+k2g_video_scanout.sv
+  assign buf_raddr = BUF_AW'(y[1] ? (BUF_STRIDE + int'(x[9:2])) : int'(x[9:2]));
+  assign buf_raddr = BUF_AW'(y[1] ? int'(x[9:2]) : (BUF_STRIDE + int'(x[9:2])));
+detect
+tb_scanout
+run
+--
+scanout-half-select-inverted
+k2g_video_scanout.sv
+    sel_half <= x[1];
+    sel_half <= ~x[1];
+detect
+tb_scanout
+run
 EOF
 
 # ---- runner ------------------------------------------------------------
