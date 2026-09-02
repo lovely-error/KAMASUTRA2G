@@ -50,3 +50,4 @@ Thumbs.db
 
 /rtl/board/*.bin
 rtl/board/k2g_rom.sv
+rtl/board/k2g_rom.svh

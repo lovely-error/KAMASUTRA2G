@@ -39,6 +39,16 @@ done
     exit 1
 }
 
+# The boot ROM is generated, not committed -- both k2g_rom.sv and the
+# k2g_rom.svh beside it come out of mkrom. Without this a fresh clone compiles
+# k2g_soc against a module that does not exist and tb_soc dies with "Module
+# 'k2g_rom' is not defined", which says nothing about the cause. Regenerated
+# every run rather than only when missing, for the same reason the test
+# programs below are: RTL and emulator then always run the same bits.
+if [ -f "$ROOT/emu/programs/hello.kasm" ]; then
+    ( cd "$ROOT/emu"         && cargo run --release --quiet --bin kasm              -- programs/hello.kasm -o "$ROOT/rtl/board/hello.bin"         && cargo run --release --quiet --bin mkrom              -- "$ROOT/rtl/board/hello.bin" -o "$ROOT/rtl/board/k2g_rom.sv"     ) > /dev/null 2>&1 || echo "warning: could not generate the boot ROM; tb_soc will fail" >&2
+fi
+
 mkdir -p "$WORK"
 cd "$WORK" || exit 1
 rm -rf work
