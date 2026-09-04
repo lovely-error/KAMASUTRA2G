@@ -35,7 +35,7 @@ fn emit_enum(
 	// The tag width is written explicitly rather than left to inference. DDL
 	// would infer it from the largest discriminant, which for a sparse enum is
 	// narrower than the field the hardware actually carries.
-	let _ = writeln!(out, "enum {ddl_type}: i{bits}");
+	let _ = writeln!(out, "enum {ddl_type}: u{bits}");
 
 	for (i, &(name, value)) in variants.iter().enumerate() {
 		let _ = writeln!(
@@ -94,8 +94,8 @@ mod tests {
 
 		assert!(ddl.contains("GENERATED FILE -- DO NOT EDIT BY HAND."));
 		// Every enum carries an explicit tag width.
-		assert!(ddl.contains("enum lb_e: i6"), "{ddl}");
-		assert!(ddl.contains("enum rdt_e: i3"), "{ddl}");
+		assert!(ddl.contains("enum lb_e: u6"), "{ddl}");
+		assert!(ddl.contains("enum rdt_e: u3"), "{ddl}");
 		// The same pinned encoding the SystemVerilog test checks.
 		assert!(ddl.contains("LB_ADD = 6'b110101"), "{ddl}");
 		// One discriminant per code point, all 64 of them.

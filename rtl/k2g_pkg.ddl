@@ -12,7 +12,7 @@
 -- -------------------------------------------------------------------------
 
 -- LB -- 64 variants, 6 bits. Rust: `insns::LB`.
-enum lb_e: i6
+enum lb_e: u6
   LB_EP1 = 6'b111111   -- 63
   LB_PUC8 = 6'b111110   -- 62
   LB_PUC16 = 6'b111101   -- 61
@@ -86,7 +86,7 @@ enum lb_e: i6
   LB_UNCLAIMED_0 = 6'b000000   -- 0
 
 -- EP1 -- 32 variants, 5 bits. Rust: `insns::EP1`.
-enum ep1_e: i5
+enum ep1_e: u5
   EP1_EP2 = 5'b11111   -- 31
   EP1_UTO = 5'b11110   -- 30
   EP1_SS = 5'b11101   -- 29
@@ -124,7 +124,7 @@ enum ep1_e: i5
   EP1_UNCLAIMED_0 = 5'b00000   -- 0
 
 -- EP2 -- 32 variants, 5 bits. Rust: `insns::EP2`.
-enum ep2_e: i5
+enum ep2_e: u5
   EP2_FLAG = 5'b11111   -- 31
   EP2_CSP = 5'b11110   -- 30
   EP2_TC = 5'b11101   -- 29
@@ -162,7 +162,7 @@ enum ep2_e: i5
   EP2_UNCLAIMED_0 = 5'b00000   -- 0
 
 -- CC -- 32 variants, 5 bits. Rust: `insns::CC`.
-enum cc_e: i5
+enum cc_e: u5
   CC_OVERFLOW_SET = 5'b11111   -- 31
   CC_FLAG_SET = 5'b11110   -- 30
   CC_VALUE_ZERO = 5'b11101   -- 29
@@ -200,7 +200,7 @@ enum cc_e: i5
   CC_UNCLAIMED_0 = 5'b00000   -- 0
 
 -- RDT -- 8 variants, 3 bits. Rust: `insns::RDT`.
-enum rdt_e: i3
+enum rdt_e: u3
   RDT_UNCLAIMED_7 = 3'b111   -- 7
   RDT_S32 = 3'b110   -- 6
   RDT_S16 = 3'b101   -- 5
